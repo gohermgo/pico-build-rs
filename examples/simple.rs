@@ -9,7 +9,7 @@ fn main() -> ExitCode {
         .with_max_level(LevelFilter::TRACE)
         .init();
 
-    let Some(cartridge_main_file) = get_cartridge_main_file_path() else {
+    let Some(cartridge_main_file) = get_cartridge_main_file_path("maxtabs.p8") else {
         tracing::warn!("Failed to find cargo manifest-directory in environment");
         return ExitCode::FAILURE;
     };
@@ -35,11 +35,11 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn get_cartridge_main_file_path() -> Option<path::PathBuf> {
+fn get_cartridge_main_file_path<P: AsRef<path::Path>>(file_name: P) -> Option<path::PathBuf> {
     option_env!("CARGO_MANIFEST_DIR")
         .map(path::PathBuf::from)
         .map(|mut path| {
-            path.push("main.p8");
+            path.push(file_name);
             path
         })
 }

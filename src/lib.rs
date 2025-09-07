@@ -285,12 +285,12 @@ impl fmt::Debug for P8CartMetadataBuf {
 struct P8CartData<'a> {
     lua: Section<'a>,
     gfx: Section<'a>,
-    gff: Section<'a>,
+    gff: Option<Section<'a>>,
     /// Label is optional
     label: Option<Section<'a>>,
-    map: Section<'a>,
-    sfx: Section<'a>,
-    music: Section<'a>,
+    map: Option<Section<'a>>,
+    sfx: Option<Section<'a>>,
+    music: Option<Section<'a>>,
 }
 
 /// Returns the section-delimiters ordered by line-number
@@ -518,11 +518,11 @@ impl<'a> P8CartData<'a> {
                 Some(P8CartData {
                     lua: lua?,
                     gfx: gfx?,
-                    gff: gff?,
+                    gff,
                     label,
-                    map: map?,
-                    sfx: sfx?,
-                    music: music?,
+                    map,
+                    sfx,
+                    music,
                 })
             }
         }
@@ -544,11 +544,11 @@ impl<'a> P8CartData<'a> {
         P8CartData {
             lua: lua.into_owned(),
             gfx: gfx.into_owned(),
-            gff: gff.into_owned(),
+            gff: gff.map(Section::into_owned),
             label: label.map(Section::into_owned),
-            map: map.into_owned(),
-            sfx: sfx.into_owned(),
-            music: music.into_owned(),
+            map: map.map(Section::into_owned),
+            sfx: sfx.map(Section::into_owned),
+            music: music.map(Section::into_owned),
         }
     }
 }
@@ -556,10 +556,10 @@ impl<'a> P8CartData<'a> {
 #[derive(Debug)]
 struct P8AssetData<'a> {
     gfx: Section<'a>,
-    gff: Section<'a>,
-    map: Section<'a>,
-    sfx: Section<'a>,
-    music: Section<'a>,
+    gff: Option<Section<'a>>,
+    map: Option<Section<'a>>,
+    sfx: Option<Section<'a>>,
+    music: Option<Section<'a>>,
 }
 
 impl P8AssetData<'_> {
@@ -573,10 +573,10 @@ impl P8AssetData<'_> {
         } = self;
         P8AssetData {
             gfx: gfx.into_owned(),
-            gff: gff.into_owned(),
-            map: map.into_owned(),
-            sfx: sfx.into_owned(),
-            music: music.into_owned(),
+            gff: gff.map(Section::into_owned),
+            map: map.map(Section::into_owned),
+            sfx: sfx.map(Section::into_owned),
+            music: music.map(Section::into_owned),
         }
     }
 }
