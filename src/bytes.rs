@@ -99,11 +99,11 @@ impl<'a> Iterator for NewlineIter<'a> {
     }
 }
 
-pub struct TabIter<'a>(&'a [u8]);
+pub struct TabIter<'a>(Option<&'a [u8]>);
 
 impl<'a> TabIter<'a> {
     pub const fn new(src: &'a [u8]) -> TabIter<'a> {
-        TabIter(src)
+        TabIter(Some(src))
     }
 }
 
@@ -117,18 +117,22 @@ impl<'a, T: AsRef<[u8]> + ?Sized> From<&'a T> for TabIter<'a> {
 impl<'a> Iterator for TabIter<'a> {
     type Item = &'a [u8];
     fn next(&mut self) -> Option<Self::Item> {
-        const TAB_SEQUENCE: &[u8] = b"-->8";
+        let src = self.0?;
 
-        let index_of_tab_sequence = self
-            .0
+        const TAB_SEQUENCE: &[u8] = b"-->8";
+        let Some(index_of_tab_sequence) = src
             .windows(TAB_SEQUENCE.len())
             .enumerate()
-            .find_map(|(idx, window)| window.eq(TAB_SEQUENCE).then_some(idx))?;
+            .find_map(|(idx, window)| window.eq(TAB_SEQUENCE).then_some(idx))
+        else {
+            self.0 = None;
+            return Some(src);
+        };
 
-        let (tab_data, remainder) = self.0.split_at(index_of_tab_sequence);
+        let (tab_data, remainder) = src.split_at(index_of_tab_sequence);
 
         let (_tab_sequence, remainder) = remainder.split_at(TAB_SEQUENCE.len() + 1);
-        self.0 = remainder;
+        self.0 = Some(remainder);
 
         Some(tab_data)
     }

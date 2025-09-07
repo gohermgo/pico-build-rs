@@ -249,7 +249,7 @@ impl P8AssetData<'_> {
     }
 }
 
-const P8_MAX_CODE_EDITOR_TAB_COUNT: usize = 15;
+const P8_MAX_CODE_EDITOR_TAB_COUNT: usize = 16;
 
 /// Always of the `lua` type
 struct Tab<'a> {
@@ -289,15 +289,14 @@ impl<'a> P8CodeData<'a> {
     ) -> P8CodeData<'a> {
         let mut tabs = <[Option<Tab<'a>>; P8_MAX_CODE_EDITOR_TAB_COUNT]>::default();
         let tab_iter = bytes::TabIter::new(&section_data.0);
+
+        // Increment over the __lua__ marker
+        line_number += 1;
+
         for (idx, tab) in tab_iter.enumerate() {
+            // Increment over previous iteration tab-separator (not for first)
             if idx != 0 {
                 line_number += 1;
-            };
-            line_number = if idx == 0 {
-                line_number
-            } else {
-                // Have to increment past the tab-separator
-                line_number + 1
             };
             tracing::debug!("Tab-index: {idx}: {:?}", core::str::from_utf8(tab));
             let section_data: &'a SectionData = unsafe { transmute(tab) };
