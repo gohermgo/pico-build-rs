@@ -1,0 +1,17 @@
+[package]
+name = "pico-build-rs-cli"
+version = "0.1.0"
+edition = "2024"
+authors = { workspace = true }
+
+[dependencies]
+# Internal
+pico-build-rs = { workspace = true }
+
+# External
+anyhow = "1.0.99"
+config = "0.15.15"
+clap = { version = "4.5.47", features = ["derive"] }
+
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

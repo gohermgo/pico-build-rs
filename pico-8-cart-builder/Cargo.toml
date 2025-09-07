@@ -1,0 +1,13 @@
+[package]
+name = "pico-8-cart-builder"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Internal
+bytes = { workspace = true }
+pico-8-cart-model = { workspace = true }
+
+# External
+tracing = { workspace = true }
