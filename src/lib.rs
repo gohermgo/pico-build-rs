@@ -9,172 +9,10 @@ use alloc::borrow::Cow;
 
 use std::io;
 
-/// A section in a .p8 cartridge file
-#[derive(Debug, PartialEq, Eq)]
-enum SectionType {
-    Lua,
-    Gfx,
-    Gff,
-    Label,
-    Map,
-    Sfx,
-    Music,
-}
+mod bytes;
 
-impl From<SectionType> for &'static str {
-    fn from(value: SectionType) -> Self {
-        <&'static str as From<&SectionType>>::from(&value)
-    }
-}
-impl From<&SectionType> for &'static str {
-    fn from(value: &SectionType) -> Self {
-        match value {
-            SectionType::Lua => "__lua__",
-            SectionType::Gfx => "__gfx__",
-            SectionType::Gff => "__gff__",
-            SectionType::Label => "__label__",
-            SectionType::Map => "__map__",
-            SectionType::Sfx => "__sfx__",
-            SectionType::Music => "__music__",
-        }
-    }
-}
-
-const SECTION_TYPES: &[SectionType] = &[
-    SectionType::Lua,
-    SectionType::Gfx,
-    SectionType::Gff,
-    SectionType::Label,
-    SectionType::Map,
-    SectionType::Sfx,
-    SectionType::Music,
-];
-
-fn get_line_section_type<T: AsRef<[u8]> + ?Sized>(line_src: &T) -> Option<&'static SectionType> {
-    SECTION_TYPES.iter().find(|ty| {
-        let needle = <&'static str as From<&SectionType>>::from(*ty).as_bytes();
-        line_src.as_ref().starts_with(needle)
-    })
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct SectionDelimiter<'a> {
-    /// The type of section
-    ty: &'a SectionType,
-    /// The (0-based) index of the line when first discovering this section
-    line_number: usize,
-    /// The reader-offset when first discovering this section
-    offset: usize,
-}
-
-impl PartialOrd for SectionDelimiter<'_> {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.line_number.cmp(&other.line_number))
-    }
-}
-
-impl Ord for SectionDelimiter<'_> {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.line_number.cmp(&other.line_number)
-    }
-}
-
-// struct Tab {
-//     title: String,
-//     code: Box<[u8]>,
-// }
-
-#[derive(Debug)]
-struct SectionData([u8]);
-
-impl ToOwned for SectionData {
-    type Owned = SectionDataBuf;
-    fn to_owned(&self) -> Self::Owned {
-        SectionDataBuf(Box::from(&self.0))
-    }
-}
-
-/// Returns the index of the sequence if it can be found
-#[tracing::instrument(level = "debug", skip(bytes, seq), ret)]
-fn bytes_find_sequence(bytes: &[u8], seq: &[u8]) -> Option<usize> {
-    tracing::debug!(
-        "Searching {} bytes for sequence {:?}",
-        bytes.len(),
-        core::str::from_utf8(seq)
-    );
-    bytes
-        .windows(seq.len())
-        .enumerate()
-        .find_map(|(seq_idx, window)| window.eq(seq).then_some(seq_idx))
-}
-
-/// Makes sure the sequence is removed from the bytes
-fn split_bytes_at_sequence_exclusive<'a>(
-    bytes: &'a [u8],
-    seq: &[u8],
-) -> Option<(&'a [u8], &'a [u8])> {
-    bytes_find_sequence(bytes, seq).and_then(|seq_idx| bytes.split_at_checked(seq_idx + seq.len()))
-}
-
-impl SectionData {
-    #[tracing::instrument(level = "debug", skip(self, seq))]
-    fn split_at_sequence_exclusive<'a>(
-        &'a self,
-        seq: &[u8],
-    ) -> Option<(&'a SectionData, &'a SectionData)> {
-        split_bytes_at_sequence_exclusive(&self.0, seq).map(|pair| {
-            let pair: (&'a SectionData, &'a SectionData) = unsafe { transmute(pair) };
-            pair
-        })
-    }
-}
-
-#[derive(Debug)]
-struct SectionDataBuf(Box<[u8]>);
-
-impl Deref for SectionDataBuf {
-    type Target = SectionData;
-    fn deref(&self) -> &Self::Target {
-        let slice = self.0.as_ref();
-        let section_data: &SectionData = unsafe { transmute(slice) };
-        section_data
-    }
-}
-
-impl Borrow<SectionData> for SectionDataBuf {
-    fn borrow(&self) -> &SectionData {
-        self
-    }
-}
-
-struct Section<'a> {
-    ty: &'static SectionType,
-    line_number: usize,
-    data: Cow<'a, SectionData>,
-}
-
-impl Section<'_> {
-    fn into_owned(self) -> Section<'static> {
-        let Section {
-            ty,
-            line_number,
-            data,
-        } = self;
-        Section {
-            ty,
-            line_number,
-            data: Cow::Owned(data.into_owned()),
-        }
-    }
-}
-
-impl core::fmt::Debug for Section<'_> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Section")
-            .field("ty", &self.ty)
-            .finish_non_exhaustive()
-    }
-}
+mod section;
+pub use section::{Section, SectionData, SectionDataBuf, SectionDelimiter, SectionType};
 
 #[repr(transparent)]
 struct P8CartMetadata([u8]);
@@ -340,7 +178,7 @@ fn get_section_delimiters<R: io::BufRead>(
             //         line_number + line_number_offset
             //     )
             // }
-            let delimiter = get_line_section_type(line).map(|ty| {
+            let delimiter = section::get_line_type(line).map(|ty| {
                 if matches!(ty, SectionType::Lua) {
                     tracing::debug!("Got lua-line {line:#?}");
                 }
