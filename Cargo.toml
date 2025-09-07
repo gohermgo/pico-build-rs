@@ -2,8 +2,8 @@
 resolver = "3"
 members = [
   "bytes", # utilities for fuckin around with bytes
-  "pico-8-cart-model", # types which make up a pico-8 cart
-  "pico-8-cart-builder", # builds the pico-8 cart
+  "pico-8/cart-model", # types which make up a pico-8 cart
+  "pico-8/cart-builder", # builds the pico-8 cart
   "lib", # the main runtime w.r.t. non cli-concerns
   "cli" # the cli for pico-build-rs
 ]
@@ -17,8 +17,8 @@ description = "Build utility for the pico-8"
 [workspace.dependencies]
 # Internal
 bytes = { path = "./bytes" }
-pico-8-cart-model = { path = "./pico-8-cart-model" }
-pico-8-cart-builder = { path = "./pico-8-cart-builder" }
+pico-8-cart-model = { path = "./pico-8/cart-model" }
+pico-8-cart-builder = { path = "./pico-8/cart-builder" }
 pico-build-rs = { path = "./lib" }
 
 # External

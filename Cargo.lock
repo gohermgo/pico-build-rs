@@ -489,6 +489,7 @@ dependencies = [
  "anyhow",
  "clap",
  "config",
+ "pico-8-cart-model",
  "pico-build-rs",
  "tracing",
  "tracing-subscriber",
