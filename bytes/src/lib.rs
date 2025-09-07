@@ -45,6 +45,7 @@ pub fn split_at_sequence_exclusive<'a>(
     find_sequence(bytes, seq).and_then(|seq_idx| bytes.split_at_checked(seq_idx + seq.len()))
 }
 
+#[derive(Debug)]
 pub struct NewlineIter<'a>(Option<&'a [u8]>);
 
 impl<'a> NewlineIter<'a> {
@@ -99,25 +100,47 @@ impl<'a> Iterator for NewlineIter<'a> {
     }
 }
 
-pub struct TabIter<'a>(Option<&'a [u8]>);
+enum ByteCursor<'a, T: ?Sized> {
+    Head(&'a T),
+    Tail(&'a [u8]),
+}
+impl<'a, T: ?Sized> ByteCursor<'a, T> {
+    pub const fn new(val: &'a T) -> ByteCursor<'a, T> {
+        ByteCursor::Head(val)
+    }
+}
+// impl<T: AsRef<[u8]> + ?Sized> Deref for ByteCursor<'_, T> {
+//     type Target = [u8];
+//     fn deref(&self) -> &Self::Target {
+//         match self {
+//             ByteCursor::Head(src) => src.as_ref(),
+//             ByteCursor::Tail(bytes) => bytes,
+//         }
+//     }
+// }
 
-impl<'a> TabIter<'a> {
-    pub const fn new(src: &'a [u8]) -> TabIter<'a> {
-        TabIter(Some(src))
+pub struct TabIter<'a, T: ?Sized>(Option<ByteCursor<'a, T>>);
+
+impl<'a, T: AsRef<[u8]> + ?Sized> TabIter<'a, T> {
+    pub const fn new(src: &'a T) -> TabIter<'a, T> {
+        TabIter(Some(ByteCursor::new(src)))
     }
 }
 
-impl<'a, T: AsRef<[u8]> + ?Sized> From<&'a T> for TabIter<'a> {
+impl<'a, T: AsRef<[u8]> + ?Sized> From<&'a T> for TabIter<'a, T> {
     fn from(src: &'a T) -> Self {
-        let src: &'a [u8] = src.as_ref();
         TabIter::new(src)
     }
 }
 
-impl<'a> Iterator for TabIter<'a> {
+impl<'a, T: AsRef<[u8]> + ?Sized> Iterator for TabIter<'a, T> {
     type Item = &'a [u8];
     fn next(&mut self) -> Option<Self::Item> {
-        let src = self.0?;
+        let src: &'a [u8] = match self.0.take() {
+            Some(ByteCursor::Head(val)) => val.as_ref(),
+            Some(ByteCursor::Tail(bytes)) => bytes,
+            None => return None,
+        };
 
         const TAB_SEQUENCE: &[u8] = b"-->8";
         let Some(index_of_tab_sequence) = src
@@ -125,14 +148,19 @@ impl<'a> Iterator for TabIter<'a> {
             .enumerate()
             .find_map(|(idx, window)| window.eq(TAB_SEQUENCE).then_some(idx))
         else {
-            self.0 = None;
+            // In this branch, since we call `Option::take` at the beginning
+            // with a early return for the `None` case, and we could not find
+            // a tab-sequence, we simply return src and do not mutate self
             return Some(src);
         };
 
         let (tab_data, remainder) = src.split_at(index_of_tab_sequence);
 
+        // Split off the tab-sequence itself
         let (_tab_sequence, remainder) = remainder.split_at(TAB_SEQUENCE.len() + 1);
-        self.0 = Some(remainder);
+
+        // Load the remainder
+        self.0 = Some(ByteCursor::Tail(remainder));
 
         Some(tab_data)
     }

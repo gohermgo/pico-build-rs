@@ -63,6 +63,98 @@ fn get_section_delimiters(
     section_delimiters
 }
 
+/// Returns the section-delimiters ordered by line-number
+#[tracing::instrument(skip(cart_src), ret)]
+fn get_section_delimiters_v2(
+    cart_src: &[u8],
+    line_number_offset: Option<usize>,
+) -> impl Iterator<Item = pico_8_cart_model::SectionDelimiter> {
+    let mut byte_offset = 0;
+    bytes::NewlineIter::new(cart_src)
+        .enumerate()
+        .filter_map(move |(line_number, line)| {
+            let line_number_with_offset =
+                line_number + (line_number_offset.unwrap_or_default() + 1);
+            let delimiter = pico_8_cart_model::section::get_line_type(line)
+                .copied()
+                .map(|r#type| {
+                    tracing::debug!(
+                        "Section of {type:?} starts at {line_number_with_offset}: {:?}",
+                        core::str::from_utf8(line)
+                    );
+                    pico_8_cart_model::SectionDelimiter {
+                        r#type,
+                        line_number: line_number_with_offset,
+                        byte_offset,
+                    }
+                });
+            if delimiter.is_none() {
+                tracing::debug!(
+                    "{line_number_with_offset}: {:?}",
+                    core::str::from_utf8(line)
+                );
+            }
+            byte_offset += line.len();
+            delimiter
+        })
+}
+
+#[tracing::instrument(level = "debug", skip(cart_src, delimiters), ret)]
+fn get_sections(
+    cart_src: &[u8],
+    delimiters: impl Iterator<Item = pico_8_cart_model::SectionDelimiter>,
+) -> impl Iterator<Item = pico_8_cart_model::Section<'_>> {
+    // Collect so that we may sort
+    let mut sorted_delimiters: Vec<pico_8_cart_model::SectionDelimiter> = delimiters.collect();
+
+    // Sort so that we iterate in line with line-numbers
+    sorted_delimiters.sort();
+
+    let mut next_section_offset = 0;
+
+    sorted_delimiters
+        .into_iter()
+        // Reverse, so we can traverse backwards and use an external
+        // variable to track previous (next actually, since reverse)
+        // section length
+        .rev()
+        .enumerate()
+        .filter_map(
+            move |(
+                idx,
+                pico_8_cart_model::SectionDelimiter {
+                    r#type,
+                    line_number,
+                    byte_offset,
+                },
+            )| {
+                let type_string =
+                    <&'static str as From<&pico_8_cart_model::SectionType>>::from(&r#type);
+                // Filter out the type-marker + `\n` before converting into section data
+                //
+                // We can always reverse the slice provided we need to recover it
+                // (and still in borrowed cow-state)
+                let offset_without_type_marker = byte_offset + type_string.len() + 1;
+                let section_src = if idx == 0 {
+                    cart_src.get(offset_without_type_marker..)
+                } else {
+                    cart_src.get(offset_without_type_marker..next_section_offset)
+                }?;
+
+                next_section_offset = byte_offset;
+
+                let section = pico_8_cart_model::Section::new(r#type, line_number, section_src);
+
+                tracing::debug!(
+                    "[Line: {line_number:>4} | Size: {:>6} | Offset: {offset_without_type_marker:>6} -> {:>6}] {type:?}",
+                    section_src.len(),
+                    offset_without_type_marker + section_src.len()
+                );
+                Some(section)
+            },
+        )
+}
+
 impl<'a> P8CartData<'a> {
     #[tracing::instrument(skip(cart_src))]
     fn get_from_lines(
@@ -91,7 +183,6 @@ impl<'a> P8CartData<'a> {
                 //
                 // We can always reverse the slice provided we need to recover it
                 // (and still in borrowed cow-state)
-                // let section_src = cart_src.get(ty_str.len() + 1..)?;
                 let offset_without_type_marker = offset + ty_str.len() + 1;
                 let section_src = if idx == 0 {
                     cart_src.get(offset_without_type_marker..)

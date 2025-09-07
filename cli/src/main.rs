@@ -1,4 +1,5 @@
 use std::fs;
+use std::io;
 
 use anyhow::anyhow;
 use clap::Parser;
@@ -27,9 +28,17 @@ fn main() -> anyhow::Result<()> {
 
     let mut cart_file = fs::File::open(cart_path)?;
 
-    let cart = pico_build_rs::P8Cart::try_from_reader(&mut cart_file)
-        .map_err(|e| anyhow!("Failed to read cart data from file: {e}"));
-    tracing::info!("{cart:#?}");
+    // Buffer for file-data
+    let mut cart_src = vec![];
+
+    // Copy file-data
+    io::Read::read_to_end(&mut cart_file, &mut cart_src)?;
+
+    let cart = pico_8_cart_model::Cart::from_cart_source(cart_src.as_ref())?;
+
+    // let cart = pico_build_rs::P8Cart::try_from_reader(&mut cart_file)
+    //     .map_err(|e| anyhow!("Failed to read cart data from file: {e}"));
+    tracing::info!("{cart:?}");
 
     Ok(())
 }
