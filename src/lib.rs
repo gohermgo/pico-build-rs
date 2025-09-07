@@ -11,29 +11,26 @@ use std::io;
 
 mod bytes;
 
+mod header;
+
 mod section;
 pub use section::{Section, SectionData, SectionDataBuf, SectionDelimiter, SectionType};
+
+use crate::header::Header;
 
 #[repr(transparent)]
 struct P8CartMetadata([u8]);
 
-fn find_byte_index<T: AsRef<[u8]> + ?Sized>(src: &T, byte: u8) -> Option<usize> {
-    src.as_ref()
-        .iter()
-        .enumerate()
-        .find_map(|(idx, elt)| (*elt == byte).then_some(idx))
-}
-
 impl P8CartMetadata {
     pub fn get_as_tuple(&self) -> Option<(&[u8], &[u8])> {
-        let newline_idx = find_byte_index(&self.0, b'\n')? + 1;
+        let newline_idx = bytes::find_index_of_element(&self.0, b'\n')? + 1;
         Some(unsafe { self.0.split_at_unchecked(newline_idx) })
     }
     pub fn get_version(&self) -> Option<u32> {
         let (_, version_line) = self.get_as_tuple()?;
 
         // Find space and add 1
-        let space_idx = find_byte_index(version_line, b' ')? + 1;
+        let space_idx = bytes::find_index_of_element(version_line, b' ')? + 1;
         let (_, version_number) = unsafe { version_line.split_at_unchecked(space_idx) };
 
         let version_number_str = core::str::from_utf8(version_number)
@@ -47,11 +44,11 @@ impl P8CartMetadata {
     #[tracing::instrument(skip(cart_src))]
     fn split_from<T: AsRef<[u8]> + ?Sized>(cart_src: &T) -> Option<(&P8CartMetadata, &[u8])> {
         // Find first newline and split version line (and add one to not include newline)
-        let newline_idx_fst = find_byte_index(cart_src, b'\n')? + 1;
+        let newline_idx_fst = bytes::find_index_of_element(cart_src, b'\n')? + 1;
         let (_, version_line) = unsafe { cart_src.as_ref().split_at_unchecked(newline_idx_fst) };
 
         // Find second newline index
-        let newline_idx_snd = find_byte_index(version_line, b'\n')? + 1;
+        let newline_idx_snd = bytes::find_index_of_element(version_line, b'\n')? + 1;
 
         // Calculate length from found indices
         let metadata_length = newline_idx_fst + newline_idx_snd;
@@ -419,7 +416,7 @@ impl P8AssetData<'_> {
     }
 }
 
-const P8_MAX_CODE_EDITOR_TAB_COUNT: usize = 8;
+const P8_MAX_CODE_EDITOR_TAB_COUNT: usize = 16;
 
 /// Always of the `lua` type
 struct Tab<'a> {
@@ -576,9 +573,9 @@ impl<'a> P8CodeData<'a> {
 
 #[derive(Debug)]
 pub struct P8Cart<'a> {
+    header: Cow<'a, Header>,
     /// Label is optional
     label: Option<Section<'a>>,
-    metadata: Cow<'a, P8CartMetadata>,
     asset_data: P8AssetData<'a>,
     code_data: P8CodeData<'a>,
 }
@@ -586,14 +583,14 @@ pub struct P8Cart<'a> {
 impl<'a> P8Cart<'a> {
     fn into_owned(self) -> P8Cart<'static> {
         let P8Cart {
+            header,
             label,
-            metadata,
             asset_data,
             code_data,
         } = self;
         P8Cart {
+            header: Cow::Owned(header.into_owned()),
             label: label.map(Section::into_owned),
-            metadata: Cow::Owned(metadata.into_owned()),
             asset_data: asset_data.into_owned(),
             code_data: code_data.into_owned(),
         }
@@ -619,8 +616,8 @@ impl<'a> P8Cart<'a> {
 
     /// Attempts to parse the provided cart-source
     pub fn from_cart_source(cart_src: &'a [u8]) -> Result<P8Cart<'a>, Box<dyn core::error::Error>> {
-        let (metadata, remainder) =
-            P8CartMetadata::split_from(cart_src).expect("failed to split cart-metadata");
+        let (header, remainder) =
+            header::split_from(cart_src).expect("failed to split cart-header");
 
         let mut buf_reader = io::BufReader::new(remainder);
         let mut line_reader = io::BufRead::lines(&mut buf_reader);
@@ -650,7 +647,7 @@ impl<'a> P8Cart<'a> {
         };
 
         Ok(P8Cart {
-            metadata: Cow::Borrowed(metadata),
+            header: Cow::Borrowed(header),
             label,
             code_data: P8CodeData::from_lua_section(code_line_number, code_section_data),
             asset_data: P8AssetData {
@@ -717,5 +714,17 @@ __gfx__
 00700700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 ";
     #[test]
-    fn parses_metadata() {}
+    fn parses_metadata() {
+        let md_opt = P8CartMetadata::split_from(TEST_DATA);
+        assert!(md_opt.is_some());
+
+        let (md, _) = md_opt.unwrap();
+
+        let tpl = md.get_as_tuple();
+        assert!(tpl.is_some());
+
+        let (header_line, version_line) = tpl.unwrap();
+        assert_eq!(header_line, b"pico-8 cartridge // http://www.pico-8.com\n");
+        assert_eq!(version_line, b"version 43\n");
+    }
 }
