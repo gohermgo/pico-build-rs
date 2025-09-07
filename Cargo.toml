@@ -22,5 +22,5 @@ pico-8-cart-builder = { path = "./pico-8/cart-builder" }
 pico-build-rs = { path = "./lib" }
 
 # External
-tracing = { version = "0.1.41", features = ["release_max_level_info", "max_level_trace"] }
+tracing = { version = "0.1.41", features = ["release_max_level_info", "max_level_debug"] }
 tracing-subscriber = "0.3.20"

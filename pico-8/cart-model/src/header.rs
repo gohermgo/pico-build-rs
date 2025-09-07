@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn basic() {
         const ONLY_GFX_SECTION_MAX_TABS: &[u8] =
-            include_bytes!("../../pico-build-test-src/maxtabs.p8");
+            include_bytes!("../../../pico-build-test-src/maxtabs.p8");
         let opt = split_from(ONLY_GFX_SECTION_MAX_TABS);
         assert!(opt.is_some());
 

@@ -1,4 +1,4 @@
 src_dir="C:\\Users\\herman\\source\\pico-build-rs\\pico-build-test-src\\"
-cart="main.p8"
+cart="main_copy_src.p8"
 watch=true
 open_pico=false

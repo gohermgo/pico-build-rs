@@ -33,6 +33,16 @@ impl From<&SectionType> for &'static str {
     }
 }
 
+impl SectionType {
+    pub fn with_data<T: IntoIterator<Item = u8>, U: FromIterator<u8>>(self, line_src: T) -> U {
+        let section_delimiter_bytes = <&'static str as From<&SectionType>>::from(&self).bytes();
+        section_delimiter_bytes
+            .chain(core::iter::once(b'\n'))
+            .chain(line_src)
+            .collect()
+    }
+}
+
 const SECTION_TYPES: &[SectionType] = &[
     SectionType::Lua,
     SectionType::Gfx,

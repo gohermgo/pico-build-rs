@@ -1,3 +1,5 @@
+#![feature(debug_closure_helpers)]
+
 extern crate alloc;
 
 use core::fmt;
@@ -12,7 +14,7 @@ pub use header::Header;
 pub mod section;
 pub use section::{Section, SectionDelimiter, SectionType};
 
-#[tracing::instrument(skip(cart_src), ret)]
+#[tracing::instrument(skip(cart_src))]
 pub fn get_section_delimiters(
     cart_src: &[u8],
     line_number_offset: Option<usize>,
@@ -24,10 +26,7 @@ pub fn get_section_delimiters(
             let line_number_with_offset =
                 line_number + (line_number_offset.unwrap_or_default() + 1);
             let delimiter = section::get_line_type(line).copied().map(|r#type| {
-                tracing::debug!(
-                    "Section of {type:?} starts at {line_number_with_offset}: {:?}",
-                    core::str::from_utf8(line)
-                );
+                tracing::debug!("{type:?}-Section starts at {line_number_with_offset}",);
                 SectionDelimiter {
                     r#type,
                     line_number: line_number_with_offset,
@@ -35,7 +34,7 @@ pub fn get_section_delimiters(
                 }
             });
             if delimiter.is_none() {
-                tracing::debug!(
+                tracing::trace!(
                     "{line_number_with_offset}: {:?}",
                     core::str::from_utf8(line)
                 );
@@ -44,7 +43,7 @@ pub fn get_section_delimiters(
             delimiter
         })
 }
-#[tracing::instrument(level = "debug", skip(cart_src, delimiters), ret)]
+#[tracing::instrument(level = "debug", skip(cart_src, delimiters))]
 pub fn get_sections(
     cart_src: &[u8],
     delimiters: impl Iterator<Item = SectionDelimiter>,
@@ -89,9 +88,9 @@ pub fn get_sections(
                 next_section_offset = byte_offset;
 
                 let section = Section::new(r#type, line_number, section_src);
-
+                let type_string = format!("{type:?}");
                 tracing::debug!(
-                    "[Line: {line_number:>4} | Size: {:>6} | Offset: {offset_without_type_marker:>6} -> {:>6}] {type:?}",
+                    "{type_string:<6} | Line: {line_number:>4} | Size: {:>6} | Offset: {offset_without_type_marker:>6} -> {:>6}",
                     section_src.len(),
                     offset_without_type_marker + section_src.len()
                 );
@@ -100,17 +99,34 @@ pub fn get_sections(
         )
 }
 
+fn debug_section_type<'db, 'a, 'b>(
+    mut f: &'db mut fmt::DebugStruct<'a, 'b>,
+    r#type: Option<SectionType>,
+    line_number: usize,
+    data: &[u8],
+    data_label: &'static str,
+) -> &'db mut fmt::DebugStruct<'a, 'b>
+where
+    'b: 'a,
+{
+    if let Some(r#type) = r#type {
+        f = f.field("type", &&r#type);
+    }
+    f.field("line_number", &&line_number)
+        .field(format!("{data_label}.len()").as_str(), &&data.len())
+}
+
 const P8_MAX_CODE_EDITOR_TAB_COUNT: usize = 16;
 
 /// Always of the `lua` type
-struct Tab<'file> {
-    line_number: usize,
-    code_data: Cow<'file, [u8]>,
+pub struct Tab<'file> {
+    pub line_number: usize,
+    pub code_data: Cow<'file, [u8]>,
 }
 
 impl Tab<'_> {
     #[tracing::instrument(level = "debug", ret)]
-    fn into_owned(self) -> Tab<'static> {
+    pub fn into_owned(self) -> Tab<'static> {
         let Tab {
             line_number,
             code_data,
@@ -124,31 +140,34 @@ impl Tab<'_> {
 
 impl fmt::Debug for Tab<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Tab")
-            .field("line_number", &self.line_number)
-            .field("code_data.len()", &self.code_data.len())
-            .finish_non_exhaustive()
+        debug_section_type(
+            &mut f.debug_struct("Tab"),
+            None,
+            self.line_number,
+            self.code_data.as_ref(),
+            "code_data",
+        )
+        .finish_non_exhaustive()
     }
 }
 
-#[tracing::instrument(level = "debug", skip(section_data), ret)]
-fn get_code_tabs_from_lua_section(
+pub type CodeTabs<'a> = [Option<Tab<'a>>; P8_MAX_CODE_EDITOR_TAB_COUNT];
+
+#[tracing::instrument(level = "debug", skip(section_data))]
+pub fn get_code_tabs_from_lua_section<T: AsRef<[u8]> + ?Sized>(
     mut line_number: usize,
-    section_data: Cow<'_, [u8]>,
-) -> [Option<Tab<'_>>; P8_MAX_CODE_EDITOR_TAB_COUNT] {
-    let mut tabs: [Option<Tab<'_>>; P8_MAX_CODE_EDITOR_TAB_COUNT] = Default::default();
+    section_data: &T,
+) -> CodeTabs<'_> {
+    let mut tabs: CodeTabs<'_> = Default::default();
 
     // Increment over the __lua__ marker
     line_number += 1;
 
-    let Cow::Borrowed(section_data) = section_data else {
-        panic!("dont give me a vector eww");
-    };
-
     for (tab_index, tab_data) in bytes::TabIter::from(section_data).enumerate() {
+        tracing::debug!("Tab {tab_index} of lua-code starts at {line_number}");
         let tab = Tab {
             line_number,
-            code_data: Cow::Borrowed(section_data),
+            code_data: Cow::Borrowed(tab_data),
         };
 
         // Increment over previous iteration tab-separator (not for first)
@@ -170,8 +189,9 @@ struct Asset<'a> {
     line_number: usize,
     asset_data: Cow<'a, [u8]>,
 }
+
 impl Asset<'_> {
-    #[tracing::instrument(level = "debug")]
+    #[tracing::instrument(level = "debug", skip(self))]
     fn into_owned(self) -> Asset<'static> {
         let Asset {
             line_number,
@@ -184,14 +204,13 @@ impl Asset<'_> {
     }
 }
 
-#[derive(Debug)]
 struct Label<'a> {
     line_number: usize,
     label_data: Cow<'a, [u8]>,
 }
 
 impl Label<'_> {
-    #[tracing::instrument(level = "debug")]
+    #[tracing::instrument(level = "debug", skip(self))]
     fn into_owned(self) -> Label<'static> {
         let Label {
             line_number,
@@ -204,8 +223,20 @@ impl Label<'_> {
     }
 }
 
-#[derive(Debug)]
-pub struct Cart<'a> {
+impl fmt::Debug for Label<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        debug_section_type(
+            &mut f.debug_struct("Label"),
+            Some(SectionType::Label),
+            self.line_number,
+            self.label_data.as_ref(),
+            "label_data",
+        )
+        .finish_non_exhaustive()
+    }
+}
+
+pub struct CartData<'a> {
     header: Cow<'a, Header>,
     /// The cart's label-data
     ///
@@ -223,9 +254,128 @@ pub struct Cart<'a> {
     sfx: Option<Asset<'a>>,
     music: Option<Asset<'a>>,
 }
-impl<'a> Cart<'a> {
-    pub fn into_owned(self) -> Cart<'static> {
-        let Cart {
+
+impl<'a> CartData<'a> {
+    #[tracing::instrument(level = "debug", skip(gfx_data), ret)]
+    pub fn from_parts(
+        header: &'a Header,
+        code_tabs: [Option<Tab<'a>>; P8_MAX_CODE_EDITOR_TAB_COUNT],
+        gfx_data: &'a [u8],
+    ) -> CartData<'a> {
+        let lines_in_header: usize = bytes::NewlineIter::from(header).count();
+        let lines_in_code: usize = code_tabs
+            .iter()
+            .filter_map(Option::as_ref)
+            .map(|Tab { code_data, .. }| bytes::NewlineIter::from(code_data.as_ref()).count())
+            .sum();
+        let gfx_line_number = lines_in_header + lines_in_code;
+        let gfx = Asset {
+            line_number: gfx_line_number,
+            asset_data: Cow::Borrowed(gfx_data),
+        };
+        CartData {
+            header: Cow::Borrowed(header),
+            gfx,
+            label: None,
+            code_tabs,
+            gff: Default::default(),
+            map: None,
+            sfx: None,
+            music: None,
+        }
+    }
+}
+
+/// Huge manual debug implementation to avoid spamming the terminal
+impl fmt::Debug for CartData<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let CartData {
+            header,
+            label,
+            code_tabs,
+            gfx,
+            gff,
+            map,
+            sfx,
+            music,
+        } = self;
+
+        f.debug_struct("Cart")
+            .field_with("header", |f| header.fmt(f))
+            .field_with("label", |f| label.fmt(f))
+            .field_with("code_tabs", |f| code_tabs.fmt(f))
+            .field_with("gfx", |f| {
+                debug_section_type(
+                    &mut f.debug_struct("Asset"),
+                    Some(SectionType::Gfx),
+                    gfx.line_number,
+                    gfx.asset_data.as_ref(),
+                    "asset_data",
+                )
+                .finish_non_exhaustive()
+            })
+            .field_with("gff", |f| {
+                if let Some(gff) = gff.as_ref() {
+                    debug_section_type(
+                        &mut f.debug_struct("Asset"),
+                        Some(SectionType::Gff),
+                        gff.line_number,
+                        gff.asset_data.as_ref(),
+                        "asset_data",
+                    )
+                    .finish_non_exhaustive()
+                } else {
+                    gff.fmt(f)
+                }
+            })
+            .field_with("map", |f| {
+                if let Some(map) = map.as_ref() {
+                    debug_section_type(
+                        &mut f.debug_struct("Asset"),
+                        Some(SectionType::Map),
+                        map.line_number,
+                        map.asset_data.as_ref(),
+                        "asset_data",
+                    )
+                    .finish_non_exhaustive()
+                } else {
+                    map.fmt(f)
+                }
+            })
+            .field_with("sfx", |f| {
+                if let Some(sfx) = sfx.as_ref() {
+                    debug_section_type(
+                        &mut f.debug_struct("Asset"),
+                        Some(SectionType::Sfx),
+                        sfx.line_number,
+                        sfx.asset_data.as_ref(),
+                        "asset_data",
+                    )
+                    .finish_non_exhaustive()
+                } else {
+                    sfx.fmt(f)
+                }
+            })
+            .field_with("music", |f| {
+                if let Some(music) = music.as_ref() {
+                    debug_section_type(
+                        &mut f.debug_struct("Asset"),
+                        Some(SectionType::Music),
+                        music.line_number,
+                        music.asset_data.as_ref(),
+                        "asset_data",
+                    )
+                    .finish_non_exhaustive()
+                } else {
+                    music.fmt(f)
+                }
+            })
+            .finish()
+    }
+}
+impl<'a> CartData<'a> {
+    pub fn into_owned(self) -> CartData<'static> {
+        let CartData {
             header,
             label,
             code_tabs,
@@ -239,7 +389,7 @@ impl<'a> Cart<'a> {
         for (tab_idx, tab_section) in code_tabs.into_iter().enumerate() {
             owned_tabs[tab_idx] = tab_section.map(Tab::into_owned);
         }
-        Cart {
+        CartData {
             header: Cow::Owned(header.into_owned()),
             label: label.map(Label::into_owned),
             code_tabs: owned_tabs,
@@ -250,8 +400,9 @@ impl<'a> Cart<'a> {
             music: music.map(Asset::into_owned),
         }
     }
-    #[tracing::instrument(level = "debug", skip(cart_src), ret)]
-    pub fn from_cart_source(cart_src: &'a [u8]) -> io::Result<Cart<'a>> {
+    #[tracing::instrument(level = "trace", skip(cart_src))]
+    pub fn from_cart_source(cart_src: &'a [u8]) -> io::Result<CartData<'a>> {
+        tracing::debug!("FROM SOURCE");
         let (header, remainder) = header::split_from(cart_src).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -262,7 +413,7 @@ impl<'a> Cart<'a> {
             )
         })?;
 
-        CartBuilder::from_iter(get_sections(
+        CartDataBuilder::from_iter(get_sections(
             remainder,
             get_section_delimiters(remainder, Some(2)),
         ))
@@ -274,10 +425,94 @@ impl<'a> Cart<'a> {
             )
         })
     }
+    /// Caution, will overwrite entirely
+    #[tracing::instrument(level = "debug")]
+    pub fn set_code_data(&mut self, code_tabs: CodeTabs<'a>) {
+        self.code_tabs = code_tabs;
+    }
+    pub fn into_cart_source<T: FromIterator<u8>>(self) -> T {
+        let CartData {
+            header,
+            label,
+            code_tabs,
+            gfx,
+            gff,
+            map,
+            sfx,
+            music,
+        } = self;
+        // 1. Header
+        let header = header.into_owned().copy_to_boxed_slice();
+        let iter = header.into_iter();
+        // 2. Lua
+        let mut code_tabs: Box<[u8]> = code_tabs
+            .into_iter()
+            .enumerate()
+            .flat_map(|(idx, elt)| {
+                elt.map(|Tab { code_data, .. }| {
+                    if matches!(idx, 0) {
+                        code_data.into_owned()
+                    } else {
+                        bytes::TAB_SEQUENCE
+                            .iter()
+                            .copied()
+                            .chain(core::iter::once(b'\n'))
+                            .chain(code_data.into_owned())
+                            .collect()
+                    }
+                })
+                .map(Vec::into_boxed_slice)
+                .unwrap_or_default()
+            })
+            .collect();
+        // Prepend the section marker only if there is data here that we wanna prepend
+        if !code_tabs.is_empty() {
+            code_tabs = SectionType::Lua.with_data(code_tabs);
+        }
+        let iter = iter.chain(code_tabs);
+
+        // 3. Gfx
+        let Asset { asset_data, .. } = gfx;
+        let gfx: Box<[u8]> = SectionType::Gfx.with_data(asset_data.into_owned());
+        let iter = iter.chain(gfx);
+
+        // 4. Label (based on experimentation)
+        let label: Box<[u8]> = label
+            .map(|Label { label_data, .. }| SectionType::Label.with_data(label_data.into_owned()))
+            .unwrap_or_default();
+        let iter = iter.chain(label);
+
+        // 5. Gff
+        let gff: Box<[u8]> = gff
+            .map(|Asset { asset_data, .. }| SectionType::Gff.with_data(asset_data.into_owned()))
+            .unwrap_or_default();
+        let iter = iter.chain(gff);
+
+        // 6. Map
+        let map: Box<[u8]> = map
+            .map(|Asset { asset_data, .. }| SectionType::Map.with_data(asset_data.into_owned()))
+            .unwrap_or_default();
+        let iter = iter.chain(map);
+
+        // 7. Sfx
+        let sfx: Box<[u8]> = sfx
+            .map(|Asset { asset_data, .. }| SectionType::Sfx.with_data(asset_data.into_owned()))
+            .unwrap_or_default();
+        let iter = iter.chain(sfx);
+
+        // 8. Music
+        let music: Box<[u8]> = music
+            .map(|Asset { asset_data, .. }| SectionType::Music.with_data(asset_data.into_owned()))
+            .unwrap_or_default();
+        let iter = iter.chain(music);
+
+        // Collect finally
+        iter.collect()
+    }
 }
 
 #[derive(Debug, Default)]
-struct CartBuilder<'a> {
+struct CartDataBuilder<'a> {
     /// Optional field
     label: Option<Label<'a>>,
 
@@ -299,22 +534,27 @@ struct CartBuilder<'a> {
     code_tabs: [Option<Tab<'a>>; P8_MAX_CODE_EDITOR_TAB_COUNT],
 }
 
-impl<'a> FromIterator<Section<'a>> for CartBuilder<'a> {
-    #[tracing::instrument(level = "debug", skip(iter), ret)]
+impl<'a> FromIterator<Section<'a>> for CartDataBuilder<'a> {
     fn from_iter<T: IntoIterator<Item = Section<'a>>>(iter: T) -> Self {
         iter.into_iter()
             .fold(Default::default(), |acc, section| match section {
                 Section::Lua {
                     line_number,
                     section_data,
-                } => CartBuilder {
-                    code_tabs: get_code_tabs_from_lua_section(line_number, section_data),
-                    ..acc
-                },
+                } => {
+                    let Cow::Borrowed(section_data) = section_data else {
+                        panic!("Why is there a vector here");
+                    };
+
+                    CartDataBuilder {
+                        code_tabs: get_code_tabs_from_lua_section(line_number, section_data),
+                        ..acc
+                    }
+                }
                 Section::Gfx {
                     line_number,
                     section_data,
-                } => CartBuilder {
+                } => CartDataBuilder {
                     gfx: Some(Asset {
                         line_number,
                         asset_data: section_data,
@@ -324,7 +564,7 @@ impl<'a> FromIterator<Section<'a>> for CartBuilder<'a> {
                 Section::Gff {
                     line_number,
                     section_data,
-                } => CartBuilder {
+                } => CartDataBuilder {
                     gff: Some(Asset {
                         line_number,
                         asset_data: section_data,
@@ -334,7 +574,7 @@ impl<'a> FromIterator<Section<'a>> for CartBuilder<'a> {
                 Section::Sfx {
                     line_number,
                     section_data,
-                } => CartBuilder {
+                } => CartDataBuilder {
                     sfx: Some(Asset {
                         line_number,
                         asset_data: section_data,
@@ -344,7 +584,7 @@ impl<'a> FromIterator<Section<'a>> for CartBuilder<'a> {
                 Section::Map {
                     line_number,
                     section_data,
-                } => CartBuilder {
+                } => CartDataBuilder {
                     map: Some(Asset {
                         line_number,
                         asset_data: section_data,
@@ -354,7 +594,7 @@ impl<'a> FromIterator<Section<'a>> for CartBuilder<'a> {
                 Section::Music {
                     line_number,
                     section_data,
-                } => CartBuilder {
+                } => CartDataBuilder {
                     music: Some(Asset {
                         line_number,
                         asset_data: section_data,
@@ -364,7 +604,7 @@ impl<'a> FromIterator<Section<'a>> for CartBuilder<'a> {
                 Section::Label {
                     line_number,
                     section_data,
-                } => CartBuilder {
+                } => CartDataBuilder {
                     label: Some(Label {
                         line_number,
                         label_data: section_data,
@@ -375,11 +615,10 @@ impl<'a> FromIterator<Section<'a>> for CartBuilder<'a> {
     }
 }
 
-impl<'a> CartBuilder<'a> {
+impl<'a> CartDataBuilder<'a> {
     /// requires header to start
-    #[tracing::instrument(level = "debug", ret)]
-    fn build_with(self, header: &'a Header) -> Option<Cart<'a>> {
-        let CartBuilder {
+    fn build_with(self, header: &'a Header) -> Option<CartData<'a>> {
+        let CartDataBuilder {
             label,
             gfx,
             gff,
@@ -388,7 +627,7 @@ impl<'a> CartBuilder<'a> {
             music,
             code_tabs,
         } = self;
-        Some(Cart {
+        Some(CartData {
             header: Cow::Borrowed(header),
             label,
 

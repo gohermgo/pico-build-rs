@@ -133,6 +133,8 @@ impl<'a, T: AsRef<[u8]> + ?Sized> From<&'a T> for TabIter<'a, T> {
     }
 }
 
+pub const TAB_SEQUENCE: &[u8] = b"-->8";
+
 impl<'a, T: AsRef<[u8]> + ?Sized> Iterator for TabIter<'a, T> {
     type Item = &'a [u8];
     fn next(&mut self) -> Option<Self::Item> {
@@ -142,7 +144,6 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Iterator for TabIter<'a, T> {
             None => return None,
         };
 
-        const TAB_SEQUENCE: &[u8] = b"-->8";
         let Some(index_of_tab_sequence) = src
             .windows(TAB_SEQUENCE.len())
             .enumerate()

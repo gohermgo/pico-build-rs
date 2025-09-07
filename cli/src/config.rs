@@ -4,24 +4,6 @@ use std::path;
 
 use crate::args::AppArgs;
 
-// /// Either uses the configuration file provided
-// /// as cli-arguments, or attempts to resolve from
-// /// environment.
-// ///
-// /// The borrowed value comes from the provided [`AppArgs`],
-// /// the owned one being a [`PathBuf`](path::PathBuf) from
-// /// the environment-variable (if found).
-// fn get_config_file_path(
-//     args: &AppArgs
-// ) -> Option<Cow<'_, path::Path>> {
-
-//         .as_deref()
-//         .map(Cow::Borrowed)
-//         .or(option_env!("PICO_BUILD_CONFIG_FILE_PATH")
-//             .map(path::PathBuf::from)
-//             .map(Cow::Owned))
-// }
-
 pub fn try_from_path<P: AsRef<path::Path> + ?Sized>(
     config_file_path: &P,
 ) -> Result<config::Config, config::ConfigError> {
