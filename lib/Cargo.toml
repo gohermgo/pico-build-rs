@@ -1,0 +1,16 @@
+[package]
+name = "pico-build-rs"
+version = "0.1.0"
+edition = "2024"
+authors = { workspace = true }
+
+[dependencies]
+# Internal
+bytes = { workspace = true }
+pico-8-cart-model = { workspace = true }
+
+# External
+tracing = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }

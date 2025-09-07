@@ -7,14 +7,10 @@ use alloc::borrow::Cow;
 
 use std::io;
 
-mod bytes;
-
-mod header;
-
 mod section;
 pub use section::{Section, SectionData, SectionDataBuf, SectionDelimiter, SectionType};
 
-use crate::header::Header;
+use pico_8_cart_model::header;
 
 #[derive(Debug)]
 struct P8CartData<'a> {
@@ -40,22 +36,23 @@ fn get_section_delimiters(
     let mut section_delimiters: Vec<SectionDelimiter<'static>> = bytes::NewlineIter::new(cart_src)
         .enumerate()
         .filter_map(|(line_number, line)| {
+            let line_number_with_offset = line_number + line_number_offset;
             let delimiter = section::get_line_type(line).map(|ty| {
                 tracing::debug!(
-                    "Section of {ty:?} starts at {line_number}: {:?}",
+                    "Section of {ty:?} starts at {line_number_with_offset}: {:?}",
                     core::str::from_utf8(line)
                 );
-                if matches!(ty, SectionType::Lua) {
-                    tracing::debug!("Got lua-line {line:#?}");
-                }
                 SectionDelimiter {
                     ty,
-                    line_number: line_number + line_number_offset,
+                    line_number: line_number_with_offset,
                     offset,
                 }
             });
             if delimiter.is_none() {
-                tracing::debug!("{line_number}: {:?}", core::str::from_utf8(line));
+                tracing::debug!(
+                    "{line_number_with_offset}: {:?}",
+                    core::str::from_utf8(line)
+                );
             }
             offset += line.len();
             delimiter
@@ -95,16 +92,12 @@ impl<'a> P8CartData<'a> {
                 // We can always reverse the slice provided we need to recover it
                 // (and still in borrowed cow-state)
                 // let section_src = cart_src.get(ty_str.len() + 1..)?;
-                let offset = offset + ty_str.len() + 1;
+                let offset_without_type_marker = offset + ty_str.len() + 1;
                 let section_src = if idx == 0 {
-                    cart_src.get(offset..)
+                    cart_src.get(offset_without_type_marker..)
                 } else {
-                    cart_src.get(offset..next_section_offset)
+                    cart_src.get(offset_without_type_marker..next_section_offset)
                 }?;
-                if matches!(ty, SectionType::Lua) {
-                    tracing::debug!("Here is lua {:#?}", core::str::from_utf8(section_src));
-                }
-
                 next_section_offset = offset;
 
                 let section_data: &SectionData = unsafe { transmute(section_src) };
@@ -114,9 +107,9 @@ impl<'a> P8CartData<'a> {
                     data: Cow::Borrowed(section_data),
                 };
                 tracing::debug!(
-                    "[Line: {line_number:>4} | Size: {:>6} | Offset: {offset:>6} -> {:>6}] {ty:?}",
+                    "[Line: {line_number:>4} | Size: {:>6} | Offset: {offset_without_type_marker:>6} -> {:>6}] {ty:?}",
                     section_src.len(),
-                    offset + section_src.len()
+                    offset_without_type_marker + section_src.len()
                 );
                 Some(section)
             },
@@ -271,8 +264,8 @@ impl fmt::Debug for Tab<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Tab")
             .field("line_number", &self.line_number)
-            .field("code", &String::from_utf8_lossy(&self.code.0))
-            .finish()
+            .field("code.len()", &self.code.0.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -283,10 +276,7 @@ struct P8CodeData<'a> {
 
 impl<'a> P8CodeData<'a> {
     #[tracing::instrument(level = "debug", skip(section_data), ret)]
-    fn from_lua_section_v2(
-        mut line_number: usize,
-        section_data: &'a SectionData,
-    ) -> P8CodeData<'a> {
+    fn from_lua_section(mut line_number: usize, section_data: &'a SectionData) -> P8CodeData<'a> {
         let mut tabs = <[Option<Tab<'a>>; P8_MAX_CODE_EDITOR_TAB_COUNT]>::default();
         let tab_iter = bytes::TabIter::new(&section_data.0);
 
@@ -298,7 +288,6 @@ impl<'a> P8CodeData<'a> {
             if idx != 0 {
                 line_number += 1;
             };
-            tracing::debug!("Tab-index: {idx}: {:?}", core::str::from_utf8(tab));
             let section_data: &'a SectionData = unsafe { transmute(tab) };
             tabs[idx] = Some(Tab {
                 line_number,
@@ -307,118 +296,6 @@ impl<'a> P8CodeData<'a> {
             let lines_in_section = bytes::NewlineIter::new(tab).count();
             line_number += lines_in_section;
         }
-        P8CodeData { tabs }
-    }
-    #[tracing::instrument(level = "debug", skip(section_data))]
-    fn from_lua_section(
-        mut line_number: usize,
-        mut section_data: &'a SectionData,
-    ) -> P8CodeData<'a> {
-        let mut tabs = <[Option<Tab<'a>>; P8_MAX_CODE_EDITOR_TAB_COUNT]>::default();
-        // assert!(
-        //     matches!(section.ty, SectionType::Lua),
-        //     "Attempted tabulation of non-lua section"
-        // );
-
-        const TAB_SEQUENCE: &[u8] = b"-->8";
-        let seqs = section_data
-            .0
-            .windows(TAB_SEQUENCE.len())
-            .filter(|window| (*window).eq(TAB_SEQUENCE))
-            .count();
-        tracing::info!("There should be {seqs} tab-sequences");
-
-        if section_data
-            .split_at_sequence_exclusive(TAB_SEQUENCE)
-            .is_none()
-        {
-            tracing::debug!("Only made a single tab");
-            tabs[0] = Some(Tab {
-                line_number,
-                code: Cow::Borrowed(section_data),
-            });
-            return P8CodeData { tabs };
-        }
-
-        let mut tab_idx = 0;
-        while let Some((code, remainder)) = section_data
-            .split_at_sequence_exclusive(TAB_SEQUENCE)
-            .map(|(code, remainder)| (Cow::Borrowed(code), remainder))
-        {
-            // 1 count line_number
-            let newline_count = code.0.iter().filter(|b| matches!(b, b'\n')).count();
-            tracing::debug!("Got {newline_count} newlines");
-            tracing::debug!(
-                "Here is remainder {:#?}",
-                core::str::from_utf8(&remainder.0)
-            );
-            line_number += newline_count;
-            // 2 push data at index
-            tabs[tab_idx] = Some(Tab { line_number, code });
-
-            // 3 update for next iteration
-            tab_idx += 1;
-            section_data = remainder;
-        }
-        // Since we assigned to `data` within the loop, it will be the last section
-        // 1 count line_number in the remainder `data`
-        let newline_count = section_data.0.iter().filter(|b| matches!(b, b'\n')).count();
-        line_number += newline_count;
-        // 2 push data at index (index has been pushed appropriately)
-        tabs[tab_idx] = Some(Tab {
-            line_number,
-            code: Cow::Borrowed(section_data),
-        });
-
-        // // Check if we can split a single
-        // if let Some((fst, remainder)) = section_data.split_at_sequence_exclusive(TAB_SEQUENCE) {
-        //     tracing::debug!("Managed first split");
-        //     tabs[0] = Some(Tab {
-        //         line_number,
-        //         code: Cow::Borrowed(fst),
-        //     });
-
-        //     let mut tab_idx = 1;
-
-        //     section_data = remainder;
-
-        //     while let Some((code, remainder)) = section_data
-        //         .split_at_sequence_exclusive(TAB_SEQUENCE)
-        //         .map(|(code, remainder)| (Cow::Borrowed(code), remainder))
-        //     {
-        //         // 1 count line_number
-        //         let newline_count = code.0.iter().filter(|b| matches!(b, b'\n')).count();
-        //         tracing::debug!("Got {newline_count} newlines");
-        //         line_number += newline_count;
-        //         // 2 push data at index
-        //         tabs[tab_idx] = Some(Tab { line_number, code });
-
-        //         // 3 update for next iteration
-        //         tab_idx += 1;
-        //         section_data = remainder;
-        //     }
-
-        //     // Since we assigned to `data` within the loop, it will be the last section
-        //     // 1 count line_number in the remainder `data`
-        //     let newline_count = remainder.0.iter().filter(|b| matches!(b, b'\n')).count();
-        //     line_number += newline_count;
-        //     // 2 push data at index (index has been pushed appropriately)
-        //     tabs[tab_idx] = Some(Tab {
-        //         line_number,
-        //         code: Cow::Borrowed(remainder),
-        //     });
-        // } else {
-        //     tabs[0] = Some(Tab {
-        //         line_number,
-        //         code: Cow::Borrowed(section_data),
-        //     });
-        // };
-
-        tracing::debug!(
-            "Made {} tabs",
-            tabs.iter().filter(|elt| elt.is_some()).count()
-        );
-
         P8CodeData { tabs }
     }
     fn into_owned(self) -> P8CodeData<'static> {
@@ -433,7 +310,7 @@ impl<'a> P8CodeData<'a> {
 
 #[derive(Debug)]
 pub struct P8Cart<'a> {
-    header: Cow<'a, Header>,
+    header: Cow<'a, pico_8_cart_model::Header>,
     /// Label is optional
     label: Option<Section<'a>>,
     asset_data: P8AssetData<'a>,
@@ -502,7 +379,7 @@ impl<'a> P8Cart<'a> {
         Ok(P8Cart {
             header: Cow::Borrowed(header),
             label,
-            code_data: P8CodeData::from_lua_section_v2(code_line_number, code_section_data),
+            code_data: P8CodeData::from_lua_section(code_line_number, code_section_data),
             asset_data: P8AssetData {
                 gfx,
                 gff,
@@ -526,5 +403,46 @@ mod test_data {
     /// version 43
     ///
     /// empty other than gfx
-    pub(crate) const ONLY_GFX_SECTION_MAX_TABS: &str = r"";
+    pub(crate) const ONLY_GFX_SECTION_MAX_TABS: &str = r"pico-8 cartridge // http://www.pico-8.com
+version 43
+__lua__
+-- tab 0
+-->8
+-- tab 1
+-->8
+-- tab 2
+-->8
+-- tab 3
+-->8
+-- tab 4
+-->8
+-- tab 5
+-->8
+-- tab 6
+-->8
+-- tab 7
+-->8
+-- tab 8
+-->8
+-- tab 9
+-->8
+-- tab a
+-->8
+-- tab b
+-->8
+-- tab c
+-->8
+-- tab d
+-->8
+-- tab e
+-->8
+-- tab f
+__gfx__
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00700700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00077000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00077000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00700700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+";
 }

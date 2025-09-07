@@ -5,8 +5,6 @@ use core::ops::Deref;
 
 use alloc::borrow::Cow;
 
-use crate::bytes;
-
 /// A section in a .p8 cartridge file
 #[derive(Debug, PartialEq, Eq)]
 pub enum SectionType {
@@ -149,6 +147,8 @@ impl fmt::Debug for Section<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Section")
             .field("ty", &self.ty)
+            .field("line_number", &self.line_number)
+            .field("data.len()", &self.data.0.len())
             .finish_non_exhaustive()
     }
 }
