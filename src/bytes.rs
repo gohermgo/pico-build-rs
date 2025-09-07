@@ -1,10 +1,3 @@
-pub fn find_index_of_element<T: AsRef<[u8]> + ?Sized>(src: &T, byte: u8) -> Option<usize> {
-    src.as_ref()
-        .iter()
-        .enumerate()
-        .find_map(|(idx, elt)| (*elt == byte).then_some(idx))
-}
-
 pub const fn find_index_of_element_const(src: &[u8], byte: u8) -> Option<usize> {
     let (mut iter_index, mut found_index) = (0, None);
 
@@ -61,6 +54,7 @@ impl<'a> NewlineIter<'a> {
     }
     /// Const compatible string-conversion constructor
     #[inline]
+    #[allow(dead_code)]
     pub const fn from_str(src: &'a str) -> NewlineIter<'a> {
         let bytes = src.as_bytes();
         NewlineIter::new(bytes)
@@ -102,6 +96,41 @@ impl<'a> Iterator for NewlineIter<'a> {
     type Item = &'a [u8];
     fn next(&mut self) -> Option<Self::Item> {
         self.next_const()
+    }
+}
+
+pub struct TabIter<'a>(&'a [u8]);
+
+impl<'a> TabIter<'a> {
+    pub const fn new(src: &'a [u8]) -> TabIter<'a> {
+        TabIter(src)
+    }
+}
+
+impl<'a, T: AsRef<[u8]> + ?Sized> From<&'a T> for TabIter<'a> {
+    fn from(src: &'a T) -> Self {
+        let src: &'a [u8] = src.as_ref();
+        TabIter::new(src)
+    }
+}
+
+impl<'a> Iterator for TabIter<'a> {
+    type Item = &'a [u8];
+    fn next(&mut self) -> Option<Self::Item> {
+        const TAB_SEQUENCE: &[u8] = b"-->8";
+
+        let index_of_tab_sequence = self
+            .0
+            .windows(TAB_SEQUENCE.len())
+            .enumerate()
+            .find_map(|(idx, window)| window.eq(TAB_SEQUENCE).then_some(idx))?;
+
+        let (tab_data, remainder) = self.0.split_at(index_of_tab_sequence);
+
+        let (_tab_sequence, remainder) = remainder.split_at(TAB_SEQUENCE.len() + 1);
+        self.0 = remainder;
+
+        Some(tab_data)
     }
 }
 

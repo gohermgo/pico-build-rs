@@ -172,6 +172,31 @@ pub fn split_from<T: AsRef<[u8]> + ?Sized>(src: &T) -> Option<(&Header, &[u8])> 
     let (slice, remainder) = slice.split_at(header_len);
 
     let header = unsafe { Header::from_slice(slice) };
-    tracing::debug!("{header:?}")
+    tracing::debug!("{header:?}");
     Some((header, remainder))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn basic() {
+        let opt = split_from(crate::test_data::ONLY_GFX_SECTION_MAX_TABS);
+        assert!(opt.is_some());
+
+        let (header, _) = opt.unwrap();
+
+        let version_opt = header.get_version();
+        assert!(version_opt.is_some());
+
+        let version = version_opt.unwrap();
+
+        let version_number_res = version.parse();
+        assert!(version_number_res.is_ok());
+
+        let version_number = version_number_res.unwrap();
+
+        assert_eq!(version_number, 43)
+    }
 }
