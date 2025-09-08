@@ -32,9 +32,11 @@ fn get_lua_files<P: AsRef<path::Path> + ?Sized>(
 }
 
 impl CartBuilder {
-    #[tracing::instrument(level = "debug", ret)]
-    pub fn new(src_dir: path::PathBuf) -> CartBuilder {
-        CartBuilder { src_dir }
+    #[tracing::instrument(level = "debug", skip(src_dir) ret)]
+    pub fn new<P: AsRef<path::Path> + ?Sized>(src_dir: &P) -> CartBuilder {
+        CartBuilder {
+            src_dir: src_dir.as_ref().to_path_buf(),
+        }
     }
 
     #[tracing::instrument(level = "debug")]
