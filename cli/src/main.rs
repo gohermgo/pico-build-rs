@@ -31,7 +31,8 @@ fn main() -> anyhow::Result<()> {
     let args = AppArgs::parse();
 
     let cfg = AppConfiguration::new(&args)?;
-    tracing::info!("{cfg:#?}");
+    tracing::info!("parsed app configuration");
+    tracing::trace!("{cfg:#?}");
 
     let cart_path = cfg
         .cart_path()
@@ -85,7 +86,8 @@ fn main() -> anyhow::Result<()> {
                         event::KeyCode::Enter => {
                             let cart = pico_8_cart_builder::CartBuilder::new(&cfg.src_dir)
                                 .build(&cart_path)?;
-                            tracing::info!("{cart:#?}")
+                            tracing::info!("got cart");
+                            tracing::trace!("{cart:#?}")
                         }
                         _ => {}
                     }
@@ -138,9 +140,9 @@ fn main() -> anyhow::Result<()> {
 use ratatui::widgets::StatefulWidget;
 use tracing::Subscriber;
 use tracing::field::{Field, Visit};
-use tracing_subscriber::Layer;
-use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{Layer, fmt::FormatEvent};
+use tracing_subscriber::{fmt::MakeWriter, layer::SubscriberExt};
 
 #[derive(Debug)]
 pub struct SenderLayer {
@@ -155,9 +157,37 @@ where
         event: &tracing::Event<'_>,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
+        // let fmt = tracing_subscriber::fmt::format::Format::default()
+        //     .with_ansi(true)
+        //     .format_event(ctx, writer, event);
         event.record(&mut SendingVisitor {
             message_tx: self.message_tx.clone(),
         });
+    }
+}
+pub struct WriteIntoSender<'a> {
+    tx: &'a mpsc::Sender<String>,
+}
+impl std::io::Write for WriteIntoSender<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let s = core::str::from_utf8(buf)
+            .map_err(|e| std::io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let len = s.len();
+        self.tx
+            .send(s.to_string())
+            .map_err(|e| std::io::Error::new(io::ErrorKind::HostUnreachable, e))?;
+        Ok(len)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+impl<'a> MakeWriter<'a> for SenderLayer {
+    type Writer = WriteIntoSender<'a>;
+    fn make_writer(&'a self) -> Self::Writer {
+        WriteIntoSender {
+            tx: &self.message_tx,
+        }
     }
 }
 pub struct SendingVisitor {
@@ -179,9 +209,15 @@ impl Visit for SendingVisitor {
 fn setup_subscriber() -> mpsc::Receiver<String> {
     let (message_tx, message_rx) = mpsc::channel();
 
-    tracing_subscriber::registry()
-        .with(SenderLayer { message_tx })
+    tracing_subscriber::fmt()
+        .with_writer(SenderLayer { message_tx })
+        .with_max_level(tracing::level_filters::STATIC_MAX_LEVEL)
+        .with_ansi(true)
         .init();
+
+    // tracing_subscriber::registry()
+    //     .with(SenderLayer { message_tx })
+    //     .init();
 
     message_rx
 }
@@ -205,21 +241,22 @@ impl StatefulWidget for LogWidget {
     type State = LogState;
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
         use ratatui::widgets;
-        widgets::Paragraph::new(state.buf.iter().enumerate().fold(
-            Default::default(),
-            |acc, (index, elt)| {
-                if index == 0 {
-                    elt.to_string()
-                } else {
-                    format!("{acc}\n{elt}")
-                }
-            },
-        ))
-        .block(
-            widgets::Block::new()
-                .title("logs")
-                .borders(widgets::Borders::ALL),
-        )
-        .render(area, buf);
+        let height = area.height as usize;
+
+        let amount_off_screen = state.buf.len().checked_sub(height).unwrap_or_default();
+
+        let text = state
+            .buf
+            .iter()
+            .skip(amount_off_screen)
+            .fold(String::default(), |acc, elt| format!("{acc}{elt}"));
+
+        widgets::Paragraph::new(text)
+            .block(
+                widgets::Block::new()
+                    .title("logs")
+                    .borders(widgets::Borders::ALL),
+            )
+            .render(area, buf);
     }
 }
