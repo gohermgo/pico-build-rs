@@ -58,25 +58,6 @@ fn main() -> anyhow::Result<()> {
                 log_state.push(msg);
             }
             frame.render_stateful_widget(LogWidget {}, chunks[1], &mut log_state);
-            // frame.render_widget(
-            //     widgets::Paragraph::new(logs.iter().enumerate().fold(
-            //         Default::default(),
-            //         |acc, (index, elt)| {
-            //             if index == 0 {
-            //                 elt.to_string()
-            //             } else {
-            //                 format!("{acc}\n{elt}")
-            //             }
-            //         },
-            //     ))
-            //     .block(
-            //         widgets::Block::new()
-            //             .title("logs")
-            //             .borders(widgets::Borders::ALL),
-            //     ),
-            //     chunks[1],
-            // );
-            // frame.render_widget(widget, area);
         })?;
         if event::poll(Duration::from_millis(10))? {
             match event::read()? {
@@ -96,6 +77,8 @@ fn main() -> anyhow::Result<()> {
             }
         }
     }
+    ratatui::restore();
+    Ok(())
     // tracing::info!("Opening cart at {cart_path:?}");
 
     // let mut cart_file = fs::File::open(cart_path)?;
@@ -132,18 +115,48 @@ fn main() -> anyhow::Result<()> {
     // } else {
     //     tracing::warn!("The files were different...")
     // }
-
-    ratatui::restore();
-    Ok(())
 }
 
+use crossterm::event;
+use crossterm::event::{Event, KeyCode, KeyEvent};
 use ratatui::widgets::StatefulWidget;
 use tracing::Subscriber;
 use tracing::field::{Field, Visit};
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Layer, fmt::FormatEvent};
 use tracing_subscriber::{fmt::MakeWriter, layer::SubscriberExt};
+struct Model {
+    log_message_rx: mpsc::Receiver<String>,
+}
+enum Message {
+    OpenCartridge,
+    LogMessage(String),
+    Quit,
+}
+fn handle_event(Model { log_message_rx }: &Model) -> Option<Message> {
+    if let Ok(message) = log_message_rx.try_recv() {
+        return Some(Message::LogMessage(message));
+    };
 
+    match event::poll(Duration::from_millis(10)) {
+        Err(_) | Ok(false) => None,
+        Ok(true) => {
+            if let Ok(Event::Key(key)) = event::read() {
+                handle_key(key)
+            } else {
+                None
+            }
+        }
+    }
+}
+fn handle_key(key: KeyEvent) -> Option<Message> {
+    match key.code {
+        KeyCode::Enter => Some(Message::OpenCartridge),
+        KeyCode::Char('q' | 'Q') => Some(Message::Quit),
+        _ => None,
+    }
+}
+// fn update()
 #[derive(Debug)]
 pub struct SenderLayer {
     message_tx: mpsc::Sender<String>,
@@ -243,7 +256,37 @@ impl StatefulWidget for LogWidget {
         use ratatui::widgets;
         let height = area.height as usize;
 
-        let amount_off_screen = state.buf.len().checked_sub(height).unwrap_or_default();
+        let messages_queued = state.buf.len();
+
+        // let messages_to_take = match height.checked_sub(messages_queued) {
+        //     // No need to redraw here
+        //     Some(val) => val,
+        //     /// This implies that
+        //     None => usize::default(),
+        // };
+
+        let amount_off_screen = match state.buf.len().checked_sub(height) {
+            // There are less messages in the queue than can be on screen
+            // no need to redraw
+            Some(val) => val,
+            None => {
+                // crossterm::execute!();
+
+                usize::default()
+            }
+        };
+
+        // let amount_off_screen = match state.buf.len().checked_sub(height) {
+        //     // No need to redraw here
+        //     Some(val) => val,
+        //     /// This implies that
+        //     None => {
+
+        //         usize::default()
+        //     }
+        // };
+
+        let message_iter = state.buf.iter().skip(amount_off_screen);
 
         let text = state
             .buf
