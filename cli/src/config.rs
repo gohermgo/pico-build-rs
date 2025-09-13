@@ -155,14 +155,16 @@ impl AppConfiguration {
             })
         }
     }
-    pub fn cart_path(&self) -> Option<path::PathBuf> {
+    /// The output path (I think)
+    pub fn cart_path(&self) -> path::PathBuf {
         let mut cart_path = self.src_dir.clone();
         cart_path.push(self.cart.as_str());
+        cart_path
 
-        if cart_path.exists() {
-            Some(cart_path)
-        } else {
-            None
-        }
+        // if cart_path.exists() {
+        //     Some(cart_path)
+        // } else {
+        //     None
+        // }
     }
 }

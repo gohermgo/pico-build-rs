@@ -1,10 +1,11 @@
-use core::fmt;
+use core::ops::Deref;
 use core::time::Duration;
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
+use std::path;
 use std::sync::mpsc;
-use std::{collections::VecDeque, path};
 
 use anyhow::anyhow;
 use clap::Parser;
@@ -12,38 +13,169 @@ use ratatui::prelude::*;
 
 mod args;
 mod config;
+mod log_panel;
+
+use log_panel::LogPanelWidget;
+
+use pico_build_rs::StatefulFile;
+
+/// The size of the log-panel in log-lines
+const LOG_LINE_COUNT: usize = 20;
+
+enum ProjectFile {
+    // NonExistent,
+    Unloaded(path::PathBuf),
+    Loaded {
+        path: path::PathBuf,
+        data: pico_8_cart_model::CartData<'static>,
+    },
+}
+
+impl ProjectFile {
+    /// Extracts the cart-data, or panics if the project-file is not loaded
+    pub fn unwrap_loaded_data_ref(&self) -> &pico_8_cart_model::CartData<'static> {
+        match self {
+            // ProjectFile::NonExistent => panic!("called `unwrap_loaded_ref` on a non-existent project-file"),
+            ProjectFile::Unloaded(_) => {
+                panic!("called `unwrap_loaded_ref` on an unloaded project-file")
+            }
+            ProjectFile::Loaded { data, .. } => data,
+        }
+    }
+    pub fn new<P: AsRef<path::Path> + ?Sized>(file_path: &P) -> ProjectFile {
+        ProjectFile::Unloaded(file_path.as_ref().to_path_buf())
+    }
+    pub fn load(&mut self) -> io::Result<()> {
+        match self {
+            ProjectFile::Unloaded(path) => {
+                let data = fs::OpenOptions::new()
+                    .create(true)
+                    .read(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(path.as_path())
+                    .and_then(pico_8_cart_model::CartData::from_file)?;
+                *self = ProjectFile::Loaded {
+                    path: path.to_path_buf(),
+                    data,
+                };
+                // .map(|data| ProjectFile::Loaded { path, data })
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+    pub fn into_loaded(mut self) -> io::Result<ProjectFile> {
+        self.load()?;
+        Ok(self)
+    }
+}
+
+struct ModelV2 {
+    project_file: StatefulFile<Box<pico_8_cart_model::CartData<'static>>>,
+    source_directory: path::PathBuf,
+    source_files: Box<[StatefulFile<Box<[u8]>>]>,
+    running_state: RunningState,
+}
+
+impl ModelV2 {
+    fn new(cfg: config::AppConfiguration) -> io::Result<ModelV2> {
+        let project_file = StatefulFile::new(&cfg.cart_path());
+
+        let mut app = ModelV2 {
+            project_file,
+            source_directory: cfg.src_dir,
+            source_files: Box::default(),
+            running_state: RunningState::Running,
+        };
+
+        Ok(app)
+    }
+
+    /// Discovers all source files in the configured directory
+    fn discover_source_files(&self) -> io::Result<impl Iterator<Item = StatefulFile<Box<[u8]>>>> {
+        pico_build_rs::get_lua_files(self.source_directory.as_path())
+            .map(pico_build_rs::dir_entries_to_source_files)
+    }
+
+    /// Reads the stateful files into memory
+    fn read_source_files(&mut self) -> io::Result<()> {
+        for source_file in self.source_files.iter_mut() {
+            source_file.load()?;
+        }
+
+        Ok(())
+    }
+
+    /// Loads all source files in the configured directory
+    fn load_source_files(&mut self) -> io::Result<()> {
+        let source_files = self.discover_source_files().map(Box::from_iter)?;
+
+        self.source_files = source_files;
+
+        self.read_source_files()
+    }
+
+    /// Creates or loads the project-file
+    fn load_project_file(&mut self) -> io::Result<()> {
+        self.project_file.load()
+    }
+
+    /// Compile a new cartridge based on internal state
+    ///
+    /// Expects that [`ModelV2::load_source_files`] and [`ModelV2::load_project_file`] has been
+    /// called previously. Otherwise `Err` will be returned.
+    fn compile_cartridge(&self) -> io::Result<pico_8_cart_model::CartData<'static>> {
+        if !self.project_file.is_loaded() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Project file not loaded",
+            ));
+        }
+
+        if !self.source_files.iter().all(StatefulFile::is_loaded) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Not all source-files are loaded",
+            ));
+        }
+
+        pico_build_rs::compile_cartridge(
+            self.project_file.clone(),
+            self.source_files.iter().cloned(),
+        )
+    }
+}
 
 #[tracing::instrument(level = "info", ret)]
 fn main() -> anyhow::Result<()> {
     use crate::args::AppArgs;
     use crate::config::AppConfiguration;
-    use crossterm::event;
-    use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
-    use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-    use ratatui::widgets;
 
-    let message_rx = setup_subscriber();
+    let message_rx = log_panel::setup_tracing_subscriber();
 
     let args = AppArgs::parse();
 
     let cfg = AppConfiguration::new(&args)?;
     tracing::info!("parsed app configuration");
     tracing::trace!("{cfg:#?}");
-
     tracing::info!("source directory is {:?}", cfg.src_dir);
-    let cart_path = cfg
-        .cart_path()
-        .ok_or_else(|| anyhow!("Configuration invalid, cart path does not point to a file"))?;
-    tracing::info!("output path is {:?}", cart_path);
+    let cart_path = cfg.cart_path();
+    tracing::info!("cart path is {:?}", cart_path);
     let mut terminal = ratatui::init();
-    let log_panel_chunk = get_rect(&mut terminal.get_frame())[0];
+    let log_lines: [Line<'static>; LOG_LINE_COUNT] = core::array::from_fn(|_| Line::default());
+    let log_messages = pico_build_rs::ScrollBuffer::from(Box::from(log_lines));
+    let log_panel_chunk = get_rect(&mut terminal.get_frame(), log_messages.len())[0];
     let mut model = Model {
         src_dir: cfg.src_dir.clone(),
         cart_path,
         log_message_rx: message_rx,
-        log_messages: VecDeque::new(),
+        log_messages,
         log_message_capacity: log_panel_chunk.height as usize,
         running_state: RunningState::Running,
+        file_loading_tracker: FileLoadingTracker {
+            paths: Default::default(),
+        },
     };
     while !matches!(model.running_state, RunningState::Done) {
         terminal.draw(|frame| view(&model, frame))?;
@@ -146,25 +278,28 @@ fn main() -> anyhow::Result<()> {
 
 use crossterm::event;
 use crossterm::event::{Event, KeyCode, KeyEvent};
-use ratatui::widgets::StatefulWidget;
-use tracing::Subscriber;
-use tracing::field::{Field, Visit};
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{Layer, fmt::FormatEvent};
-use tracing_subscriber::{fmt::MakeWriter, layer::SubscriberExt};
-fn layout() -> Layout {
+
+fn layout(log_panel_lines: usize) -> Layout {
     Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),         // big main-box
-            Constraint::Percentage(50), // log-box
+            Constraint::Min(1),                         // big main-box
+            Constraint::Length(log_panel_lines as u16), // log-box
         ])
 }
-fn get_rect(frame: &mut Frame) -> std::rc::Rc<[Rect]> {
-    layout().split(frame.area())
+fn get_rect(frame: &mut Frame, log_panel_lines: usize) -> std::rc::Rc<[Rect]> {
+    layout(log_panel_lines).split(frame.area())
 }
 /// Subject to change (might want to use [`Line`] instead)
 type LogLine = Line<'static>;
+
+#[derive(Debug)]
+enum FileLoadingState {
+    Opened(path::PathBuf),
+}
+struct FileLoadingTracker {
+    paths: HashMap<String, FileLoadingState>,
+}
 struct Model {
     src_dir: path::PathBuf,
     cart_path: path::PathBuf,
@@ -172,11 +307,12 @@ struct Model {
     log_message_rx: mpsc::Receiver<String>,
 
     /// An owned log-message
-    log_messages: VecDeque<LogLine>,
+    log_messages: pico_build_rs::ScrollBuffer<Line<'static>>,
     /// The implied capacity for log-messages
     log_message_capacity: usize,
 
     running_state: RunningState,
+    file_loading_tracker: FileLoadingTracker,
 }
 enum RunningState {
     Done,
@@ -184,11 +320,21 @@ enum RunningState {
 }
 /// A statement about how the model should change
 enum Message {
+    // /// A request to open
+    // OpenCartridge {
+    //     cartridge_directory_path: path::PathBuf,
+    // },
     /// A request to compile the cartridge was made
-    CompileCartridge,
+    CompileCartridge {
+        src_dir: path::PathBuf,
+        cart_path: path::PathBuf,
+    },
 
     /// The compilation-request finished successfully
-    CompilationOutput(Box<pico_8_cart_model::CartData<'static>>),
+    CompilationOutput {
+        compiled_data: Box<pico_8_cart_model::CartData<'static>>,
+        cart_path: path::PathBuf,
+    },
 
     /// A request to quit was made
     Quit,
@@ -197,8 +343,6 @@ enum Message {
     IncomingLogLine(LogLine),
 
     ClearLog,
-
-    Reset,
 }
 
 // struct Message {
@@ -209,7 +353,7 @@ enum Message {
 // }
 
 /// Make a decision regarding how the model should change
-fn handle_event(Model { log_message_rx, .. }: &Model) -> Option<Message> {
+fn handle_event(model @ Model { log_message_rx, .. }: &Model) -> Option<Message> {
     if let Ok(log_message) = log_message_rx.try_recv() {
         return Some(Message::IncomingLogLine(log_message.into()));
     };
@@ -218,16 +362,24 @@ fn handle_event(Model { log_message_rx, .. }: &Model) -> Option<Message> {
         Err(_) | Ok(false) => None,
         Ok(true) => {
             if let Ok(Event::Key(key)) = event::read() {
-                handle_key(key)
+                handle_key(model, key)
             } else {
                 None
             }
         }
     }
 }
-fn handle_key(key: KeyEvent) -> Option<Message> {
+fn handle_key(
+    Model {
+        src_dir, cart_path, ..
+    }: &Model,
+    key: KeyEvent,
+) -> Option<Message> {
     match key.code {
-        KeyCode::Enter if key.is_press() => Some(Message::CompileCartridge),
+        KeyCode::Enter if key.is_press() => Some(Message::CompileCartridge {
+            src_dir: src_dir.clone(),
+            cart_path: cart_path.clone(),
+        }),
         KeyCode::Char('q' | 'Q') => Some(Message::Quit),
         KeyCode::Char('c' | 'C') => Some(Message::ClearLog),
         _ => None,
@@ -238,8 +390,7 @@ fn update(
         log_messages,
         log_message_capacity,
         running_state,
-        cart_path,
-        src_dir,
+        file_loading_tracker,
         ..
     }: &mut Model,
     message: Message,
@@ -253,50 +404,224 @@ fn update(
 
     match message {
         Message::ClearLog => {
-            log_messages.clear();
+            for message in log_messages.iter_mut() {
+                *message = Line::default();
+            }
+            log_messages.reset_cursor();
             None
         }
-        Message::CompileCartridge => {
-            match pico_8_cart_builder::CartBuilder::new(&src_dir).build(&cart_path) {
-                Ok(cart) => Some(Message::CompilationOutput(Box::new(cart))),
+
+        // Message::OpenCartridge {
+        //     cartridge_directory_path,
+        // } => {
+        //     let cartridge_name = cartridge_directory_path
+        //         .file_name()
+        //         .map(|file_name| file_name.to_string_lossy().into_owned())
+        //         .expect("cartridge_name");
+        //     file_loading_tracker.paths.insert(
+        //         cartridge_name,
+        //         FileLoadingState::Opening(cartridge_directory_path),
+        //     );
+        // }
+        Message::CompileCartridge { src_dir, cart_path } => {
+            struct FileLoadingWidget {
+                path: path::PathBuf,
+                status: bool,
+            }
+
+            tracing::info!("Writing to cart-path {cart_path:?}");
+            let source_files = match pico_build_rs::get_lua_files(src_dir.as_path()) {
+                Ok(files) => files.inspect(|entry| {
+                    let path = entry.path();
+                    let name = path
+                        .file_name()
+                        .map(|file_name| file_name.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    file_loading_tracker
+                        .paths
+                        .insert(name, FileLoadingState::Opened(path));
+                }),
                 Err(e) => {
-                    tracing::error!("{e}");
-                    tracing::error!("Compilation failed");
+                    tracing::error!("Failed to get lua files {e}");
+                    return None;
+                }
+            }
+            .filter_map(|source_entry| {
+                StatefulFile::try_from(source_entry)
+                    .inspect_err(|e| tracing::error!("Failed to convert source-entry: {e}"))
+                    .and_then(StatefulFile::into_loaded)
+                    .ok()
+            });
+            match StatefulFile::new(cart_path.as_path())
+                .into_loaded()
+                .and_then(|cart_file| pico_build_rs::compile_cartridge(cart_file, source_files))
+            {
+                Ok(cart) => Some(Message::CompilationOutput {
+                    compiled_data: Box::new(cart),
+                    cart_path,
+                }),
+                Err(e) => {
+                    tracing::error!("Failed to compile {e}");
                     None
                 }
             }
+            // match pico_build_rs::compile_cartridge(cart_path.as_path(), source_files) {
+            //     Ok(cart) => Some(Message::CompilationOutput {
+            //         compiled_data: Box::new(cart),
+            //         cart_path,
+            //     }),
+            //     Err(e) => {
+            //         tracing::error!("Failed to compile {e}");
+            //         None
+            //     }
+            // }
+            // let mut lua_files: Box<[fs::DirEntry]> = pico_8_cart_builder::get_lua_files(&src_dir)
+            //     .map(|entries| {
+            //         entries
+            //             .inspect(|entry| {
+            //                 let path = entry.path();
+            //                 let name = path
+            //                     .file_name()
+            //                     .map(|file_name| file_name.to_string_lossy().into_owned())
+            //                     .unwrap_or_default();
+            //                 file_loading_tracker
+            //                     .paths
+            //                     .insert(name, FileLoadingState::Opened(path));
+            //             })
+            //             .collect()
+            //     })
+            //     .inspect_err(|e| tracing::error!(" failed to get lua files {e}"))
+            //     .ok()?;
+            // lua_files.sort_by_key(|dir_entry| dir_entry.path());
+            // let tabs = pico_8_cart_builder::dir_entries_to_tabs(lua_files.into_iter());
+            // match pico_8_cart_builder::merge_tabs_with_src(&cart_path, tabs) {
+            //     Ok(cart) => Some(Message::CompilationOutput {
+            //         compiled_data: Box::new(cart),
+            //         cart_path,
+            //     }),
+            //     Err(e) => {
+            //         tracing::error!("{e}");
+            //         tracing::error!("Compilation failed");
+            //         None
+            //     }
+            // }
+            // match pico_8_cart_builder::get_lua_files(&src_dir.clone())
+            //     .map(|entries| {
+            //         entries.inspect(|entry| {
+            //             let path = entry.path();
+            //             let name = path
+            //                 .file_name()
+            //                 .map(|file_name| file_name.to_string_lossy().into_owned())
+            //                 .unwrap_or_default();
+            //             file_loading_tracker
+            //                 .paths
+            //                 .insert(name, FileLoadingState::Opened(path));
+            //         })
+            //     })
+            //     .map(pico_8_cart_builder::dir_entries_to_tabs)
+            //     .and_then(|tabs| pico_8_cart_builder::merge_tabs_with_src(&cart_path, tabs))
+            // {
+            //     Ok(cart) => Some(Message::CompilationOutput {
+            //         compiled_data: Box::new(cart),
+            //         cart_path,
+            //     }),
+            //     Err(e) => {
+            //         tracing::error!("{e}");
+            //         tracing::error!("Compilation failed");
+            //         None
+            //     }
+            // }
+            // match pico_8_cart_builder::get_lua_files(src_dir.as_path())
+            //     .map(|entries| {
+            //         entries.inspect(|entry| {
+            //             let path = entry.path();
+            //             let name = path.to_string_lossy().into_owned();
+            //             file_loading_tracker
+            //                 .paths
+            //                 .insert(name, FileLoadingState::Opened(path));
+            //         })
+            //     })
+            //     .map(pico_8_cart_builder::dir_entries_to_tabs)
+            //     .map(pico_8_cart_builder::compile_tabs_to_cart_data)
+            // {
+            // }
+            // match pico_8_cart_builder::CartBuilder::new(&src_dir).build(&cart_path) {
+            //     Ok(cart) => Some(Message::CompilationOutput {
+            //         compiled_data: Box::new(cart),
+            //         cart_path,
+            //     }),
+            //     Err(e) => {
+            //     }
+            // }
         }
-        Message::CompilationOutput(cart) => {
+        Message::CompilationOutput {
+            compiled_data: cart,
+            cart_path,
+        } => {
             // TODO: Add something here
             // Some(Message::IncomingLogLine("Compilation successful!".into()))
             tracing::info!("Compilation successful");
-            None
+            let Ok(mut file) = fs::OpenOptions::new()
+                .truncate(true)
+                .write(true)
+                .open(cart_path)
+            else {
+                tracing::error!("Failed to open output cart");
+                return None;
+            };
+            let buf: Vec<u8> = cart.into_cart_source();
+            tracing::debug!("Writing {} bytes to cart", buf.len());
+            match io::Write::write_all(&mut file, buf.as_slice()) {
+                Ok(_) => {
+                    tracing::info!("Successfully wrote to cart");
+                    None
+                }
+                Err(e) => {
+                    tracing::error!("Failed to write to cart: {e}");
+                    None
+                }
+            }
         }
         Message::Quit => {
             *running_state = RunningState::Done;
             None
         }
         Message::IncomingLogLine(log_message) => {
-            log_messages.push_front(log_message);
-            log_messages
-                .len()
-                .ge(log_message_capacity)
-                .then_some(Message::Reset)
-        }
-        Message::Reset => {
-            while log_messages.len() >= *log_message_capacity {
-                log_messages.pop_back();
-            }
+            log_messages.overwrite(log_message);
             None
+            // log_messages.push_front(log_message);
+            // log_messages
+            //     .len()
+            //     .ge(log_message_capacity)
+            //     .then_some(Message::Reset)
         }
     }
 }
-fn view(Model { log_messages, .. }: &Model, frame: &mut Frame) {
-    use ratatui::widgets::{Block, Borders};
+fn view(
+    Model {
+        log_messages,
+        file_loading_tracker,
+        ..
+    }: &Model,
+    frame: &mut Frame,
+) {
+    use ratatui::widgets::{Block, Borders, List};
 
-    let chunks = get_rect(frame);
+    let chunks = get_rect(frame, log_messages.len());
 
     frame.render_widget(Block::new().title("main").borders(Borders::ALL), chunks[0]);
+
+    let file_loading_list = List::from_iter(file_loading_tracker.paths.iter().map(
+        |(cartridge_name, state)| {
+            Text::styled(
+                format!("{cartridge_name}: {state:?}\n"),
+                Style::new().italic(),
+            )
+            .centered()
+        },
+    ));
+
+    frame.render_widget(file_loading_list, chunks[0]);
 
     let log_panel_chunk = chunks[1];
     frame.render_widget(ratatui::widgets::Clear, log_panel_chunk);
@@ -306,181 +631,11 @@ fn view(Model { log_messages, .. }: &Model, frame: &mut Frame) {
     // let cmd = size().map(|(x, y)| SetSize(x, y)).expect("size");
     // crossterm::execute!(io::stdout(), cmd).expect("failed cmd");
     // // crossterm::execute!(io::stdout(), Clear(ClearType::Purge)).expect("failed purge");
-
-    frame.render_widget(
-        LogPanelWidget {
-            log_lines: log_messages
-                .iter()
-                .take(log_panel_chunk.height as usize)
-                .cloned()
-                .collect(),
-        },
-        log_panel_chunk,
-    );
-}
-struct LogPanelWidget {
-    log_lines: Vec<LogLine>,
-}
-impl Widget for LogPanelWidget {
-    fn render(self, area: Rect, buf: &mut Buffer)
-    where
-        Self: Sized,
-    {
-        use ratatui::widgets::{Block, Paragraph};
-        Paragraph::new(self.log_lines)
-            .block(Block::bordered().title("log-panel"))
-            .render(area, buf)
-    }
-}
-/// Just intercepts the messages and forwards them to the frontend bits
-#[derive(Debug)]
-pub struct SenderLayer {
-    message_tx: mpsc::Sender<String>,
-}
-impl<S> Layer<S> for SenderLayer
-where
-    S: Subscriber,
-{
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        // let fmt = tracing_subscriber::fmt::format::Format::default()
-        //     .with_ansi(true)
-        //     .format_event(ctx, writer, event);
-        event.record(&mut SendingVisitor {
-            message_tx: self.message_tx.clone(),
-        });
-    }
-}
-pub struct WriteIntoSender<'a> {
-    tx: &'a mpsc::Sender<String>,
-}
-impl std::io::Write for WriteIntoSender<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let s = core::str::from_utf8(buf)
-            .map_err(|e| std::io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let len = s.len();
-        self.tx
-            .send(s.to_string())
-            .map_err(|e| std::io::Error::new(io::ErrorKind::HostUnreachable, e))?;
-        Ok(len)
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-impl<'a> MakeWriter<'a> for SenderLayer {
-    type Writer = WriteIntoSender<'a>;
-    fn make_writer(&'a self) -> Self::Writer {
-        WriteIntoSender {
-            tx: &self.message_tx,
-        }
-    }
-}
-struct SendingVisitor {
-    message_tx: mpsc::Sender<String>,
-}
-impl Visit for SendingVisitor {
-    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        self.record_str(field, format!("{value:?}").as_str())
-    }
-    fn record_str(&mut self, field: &Field, value: &str) {
-        match self.message_tx.send(format!("{field}={value}")) {
-            Ok(_) => {}
-            Err(e) => eprintln!("Failed to send event from sending-visitor: {e}"),
-        }
-    }
-}
-
-/// Returns a channel for the messages (u probably want em)
-fn setup_subscriber() -> mpsc::Receiver<String> {
-    let (message_tx, message_rx) = mpsc::channel();
-
-    tracing_subscriber::registry()
-        .with(SenderLayer { message_tx })
-        // .with_max_level(tracing::level_filters::STATIC_MAX_LEVEL)
-        // .compact()
-        // .with_target(false)
-        // .with_file(false)
-        // .with_level(false)
-        // .with_line_number(false)
-        // .with_ansi(true)
-        .init();
-
-    // tracing_subscriber::registry()
-    //     .with(SenderLayer { message_tx })
-    //     .init();
-
-    message_rx
-}
-struct LogWidget {}
-struct LogState {
-    buf: VecDeque<String>,
-    cap: usize,
-}
-impl LogState {
-    pub fn push(&mut self, elt: String) -> Option<String> {
-        let ret = if self.cap == self.buf.len() {
-            self.buf.pop_front()
-        } else {
-            None
-        };
-        self.buf.push_back(elt);
-        ret
-    }
-}
-impl StatefulWidget for LogWidget {
-    type State = LogState;
-    fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        use ratatui::widgets;
-        let height = area.height as usize;
-
-        let messages_queued = state.buf.len();
-
-        // let messages_to_take = match height.checked_sub(messages_queued) {
-        //     // No need to redraw here
-        //     Some(val) => val,
-        //     /// This implies that
-        //     None => usize::default(),
-        // };
-
-        let amount_off_screen = match state.buf.len().checked_sub(height) {
-            // There are less messages in the queue than can be on screen
-            // no need to redraw
-            Some(val) => val,
-            None => {
-                // crossterm::execute!();
-
-                usize::default()
-            }
-        };
-
-        // let amount_off_screen = match state.buf.len().checked_sub(height) {
-        //     // No need to redraw here
-        //     Some(val) => val,
-        //     /// This implies that
-        //     None => {
-
-        //         usize::default()
-        //     }
-        // };
-
-        let message_iter = state.buf.iter().skip(amount_off_screen);
-
-        let text = state
-            .buf
+    let widget = LogPanelWidget::from_iter(
+        log_messages
             .iter()
-            .skip(amount_off_screen)
-            .fold(String::default(), |acc, elt| format!("{acc}{elt}"));
-
-        widgets::Paragraph::new(text)
-            .block(
-                widgets::Block::new()
-                    .title("logs")
-                    .borders(widgets::Borders::ALL),
-            )
-            .render(area, buf);
-    }
+            .take(log_panel_chunk.height as usize)
+            .cloned(),
+    );
+    frame.render_widget(widget, log_panel_chunk);
 }
