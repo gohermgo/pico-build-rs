@@ -121,6 +121,7 @@ where
 const P8_MAX_CODE_EDITOR_TAB_COUNT: usize = 16;
 
 /// Always of the `lua` type
+#[derive(Clone)]
 pub struct Tab<'file> {
     pub line_number: usize,
     pub code_data: Cow<'file, [u8]>,
@@ -186,7 +187,7 @@ pub fn get_code_tabs_from_lua_section<T: AsRef<[u8]> + ?Sized>(
     tabs
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Asset<'a> {
     line_number: usize,
     asset_data: Cow<'a, [u8]>,
@@ -206,6 +207,7 @@ impl Asset<'_> {
     }
 }
 
+#[derive(Clone)]
 struct Label<'a> {
     line_number: usize,
     label_data: Cow<'a, [u8]>,
@@ -238,6 +240,7 @@ impl fmt::Debug for Label<'_> {
     }
 }
 
+#[derive(Clone)]
 pub struct CartData<'a> {
     header: Cow<'a, Header>,
     /// The cart's label-data
@@ -402,17 +405,20 @@ impl<'a> CartData<'a> {
             music: music.map(Asset::into_owned),
         }
     }
+    #[tracing::instrument(level = "trace")]
+    pub fn from_file(mut cart_file: fs::File) -> io::Result<CartData<'static>> {
+        let mut cart_source = vec![];
+
+        io::Read::read_to_end(&mut cart_file, &mut cart_source)?;
+
+        CartData::from_cart_source(cart_source.as_slice()).map(CartData::into_owned)
+    }
     #[tracing::instrument(level = "trace", skip(path))]
-    pub fn from_file_or_default<P: AsRef<path::Path> + ?Sized>(
+    pub fn from_path_or_default<P: AsRef<path::Path> + ?Sized>(
         path: &P,
     ) -> io::Result<CartData<'static>> {
         if path.as_ref().exists() {
-            let mut cart_source = vec![];
-            let mut cart_file = fs::File::open(path)?;
-
-            io::Read::read_to_end(&mut cart_file, &mut cart_source)?;
-
-            CartData::from_cart_source(cart_source.as_slice()).map(CartData::into_owned)
+            fs::File::open(path).and_then(CartData::from_file)
         } else {
             Ok(CartData::default())
         }
