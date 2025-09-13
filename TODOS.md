@@ -23,3 +23,8 @@ There are many ideas I have:
 - [ ] Figure out a solution for logging-panel
   - [x] Intercept messages from the `tracing` crate, to use them in ratatui cli-code
   - [ ] Find out how to display them on screen (currently having weird issues, might need to force redraw)
+
+### commands
+- [ ] New command: sets up cart-project, dependant on solution to [file system](TODOS#file-system) question
+  - Alternatively could do more options for user?
+- [ ] Info command: print information about loaded cart project

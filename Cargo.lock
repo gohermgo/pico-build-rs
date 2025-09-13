@@ -777,6 +777,7 @@ name = "pico-build-rs"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "pico-8-cart-builder",
  "pico-8-cart-model",
  "tracing",
  "tracing-subscriber",
