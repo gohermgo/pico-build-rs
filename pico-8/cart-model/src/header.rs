@@ -43,6 +43,20 @@ impl ToOwned for Header {
     }
 }
 
+impl Default for &'static Header {
+    fn default() -> Self {
+        const DEFAULT_HEADER: &Header = unsafe {
+            core::mem::transmute(
+                br"pico-8 cartridge // http://www.pico-8.com
+version 43
+"
+                .as_slice(),
+            )
+        };
+        DEFAULT_HEADER
+    }
+}
+
 #[repr(transparent)]
 pub struct HeaderBuf(Box<[u8]>);
 

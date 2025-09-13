@@ -6,7 +6,9 @@ use core::fmt;
 
 use alloc::borrow::Cow;
 
+use std::fs;
 use std::io;
+use std::path;
 
 pub mod header;
 pub use header::Header;
@@ -26,7 +28,7 @@ pub fn get_section_delimiters(
             let line_number_with_offset =
                 line_number + (line_number_offset.unwrap_or_default() + 1);
             let delimiter = section::get_line_type(line).copied().map(|r#type| {
-                tracing::debug!("{type:?}-Section starts at {line_number_with_offset}",);
+                tracing::trace!("{type:?}-Section starts at {line_number_with_offset}",);
                 SectionDelimiter {
                     r#type,
                     line_number: line_number_with_offset,
@@ -89,7 +91,7 @@ pub fn get_sections(
 
                 let section = Section::new(r#type, line_number, section_src);
                 let type_string = format!("{type:?}");
-                tracing::debug!(
+                tracing::trace!(
                     "{type_string:<6} | Line: {line_number:>4} | Size: {:>6} | Offset: {offset_without_type_marker:>6} -> {:>6}",
                     section_src.len(),
                     offset_without_type_marker + section_src.len()
@@ -400,6 +402,27 @@ impl<'a> CartData<'a> {
             music: music.map(Asset::into_owned),
         }
     }
+    #[tracing::instrument(level = "trace", skip(path))]
+    pub fn from_file_or_default<P: AsRef<path::Path> + ?Sized>(
+        path: &P,
+    ) -> io::Result<CartData<'static>> {
+        if path.as_ref().exists() {
+            let mut cart_source = vec![];
+            let mut cart_file = fs::File::open(path)?;
+
+            io::Read::read_to_end(&mut cart_file, &mut cart_source)?;
+
+            CartData::from_cart_source(cart_source.as_slice()).map(CartData::into_owned)
+        } else {
+            Ok(CartData::default())
+        }
+    }
+    pub fn default_with_code_tabs(code_tabs: CodeTabs<'a>) -> CartData<'a> {
+        CartData {
+            code_tabs,
+            ..Default::default()
+        }
+    }
     #[tracing::instrument(level = "trace", skip(cart_src))]
     pub fn from_cart_source(cart_src: &'a [u8]) -> io::Result<CartData<'a>> {
         tracing::debug!("FROM SOURCE");
@@ -508,6 +531,22 @@ impl<'a> CartData<'a> {
 
         // Collect finally
         iter.collect()
+    }
+}
+impl Default for CartData<'static> {
+    fn default() -> Self {
+        const DEFAULT_GFX: &[u8] = br"__gfx__
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00700700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00077000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00077000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+00700700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+        CartData::from_parts(
+            <&'static Header>::default(),
+            Default::default(),
+            DEFAULT_GFX,
+        )
     }
 }
 
@@ -627,6 +666,7 @@ impl<'a> CartDataBuilder<'a> {
             music,
             code_tabs,
         } = self;
+
         Some(CartData {
             header: Cow::Borrowed(header),
             label,
