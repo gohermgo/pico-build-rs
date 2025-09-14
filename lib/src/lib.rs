@@ -19,18 +19,20 @@ pub use section::{Section, SectionData, SectionDataBuf, SectionDelimiter, Sectio
 
 use pico_8_cart_model::header;
 
-pub struct ScrollBuffer<T> {
+/// A fixed-size collection
+/// acting like a `fifo`
+pub struct Fifo<T> {
     inner: Box<[T]>,
     cursor: usize,
 }
 
-impl<T> ScrollBuffer<T> {
+impl<T> Fifo<T> {
     /// Returns the value of the incremented cursor
     ///
     /// The cursor will be incremented such that
     /// it always refers to a region within the buffer
     const fn incremented_cursor_value(&self) -> usize {
-        let ScrollBuffer { inner, cursor } = self;
+        let Fifo { inner, cursor } = self;
 
         let naively_incremented = *cursor + 1;
 
@@ -86,32 +88,32 @@ impl<T> ScrollBuffer<T> {
     }
 }
 
-impl<T> Default for ScrollBuffer<T> {
+impl<T> Default for Fifo<T> {
     fn default() -> Self {
-        ScrollBuffer {
+        Fifo {
             inner: Box::default(),
             cursor: usize::default(),
         }
     }
 }
 
-impl<T> From<Box<[T]>> for ScrollBuffer<T> {
+impl<T> From<Box<[T]>> for Fifo<T> {
     fn from(value: Box<[T]>) -> Self {
-        ScrollBuffer {
+        Fifo {
             inner: value,
             ..Default::default()
         }
     }
 }
 
-impl<T> FromIterator<T> for ScrollBuffer<T> {
+impl<T> FromIterator<T> for Fifo<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let inner: Box<[T]> = Box::from_iter(iter);
-        ScrollBuffer::from(inner)
+        Fifo::from(inner)
     }
 }
 
-impl<'a, T> IntoIterator for &'a ScrollBuffer<T> {
+impl<'a, T> IntoIterator for &'a Fifo<T> {
     type Item = &'a T;
     type IntoIter = iter::Chain<slice::Iter<'a, T>, slice::Iter<'a, T>>;
     fn into_iter(self) -> Self::IntoIter {
@@ -121,7 +123,7 @@ impl<'a, T> IntoIterator for &'a ScrollBuffer<T> {
     }
 }
 
-impl<'a, T> IntoIterator for &'a mut ScrollBuffer<T> {
+impl<'a, T> IntoIterator for &'a mut Fifo<T> {
     type Item = &'a mut T;
     type IntoIter = iter::Chain<slice::IterMut<'a, T>, slice::IterMut<'a, T>>;
     fn into_iter(self) -> Self::IntoIter {
@@ -131,7 +133,7 @@ impl<'a, T> IntoIterator for &'a mut ScrollBuffer<T> {
     }
 }
 
-impl<T> IntoIterator for ScrollBuffer<T>
+impl<T> IntoIterator for Fifo<T>
 where
     T: Clone,
 {
@@ -164,7 +166,7 @@ mod tests {
         // Construct with 4 values
         let values: [usize; 4] = core::array::from_fn(|idx| idx);
 
-        let mut sb = ScrollBuffer::from_iter(values);
+        let mut sb = Fifo::from_iter(values);
 
         // Assert indices are matching exactly
         assert_indices!(sb, 0);
@@ -231,9 +233,11 @@ pub fn get_lua_files<P: AsRef<path::Path> + ?Sized>(
 
 #[tracing::instrument(level = "debug", skip(dir_entries))]
 pub fn dir_entries_to_source_files(
-    dir_entries: impl Iterator<Item = fs::DirEntry>,
-) -> impl Iterator<Item = StatefulFile<Box<[u8]>>> {
-    dir_entries.filter_map(|file| StatefulFile::try_from(file).ok())
+    dir_entries: impl IntoIterator<Item = fs::DirEntry>,
+) -> impl Iterator<Item = FileData<Box<[u8]>>> {
+    dir_entries
+        .into_iter()
+        .filter_map(|file| FileData::try_from(file).ok())
 }
 
 /// Returns an iterator of lua source-files
@@ -241,16 +245,16 @@ pub fn dir_entries_to_source_files(
 fn source_files_in_directory<P: AsRef<path::Path> + ?Sized>(
     path: &P,
     // target_extension: &O,
-) -> io::Result<impl Iterator<Item = StatefulFile<Box<[u8]>>>> {
+) -> io::Result<impl Iterator<Item = FileData<Box<[u8]>>>> {
     get_files_in_directory_with_extension(path, "lua").map(dir_entries_to_source_files)
 }
 
 #[tracing::instrument(level = "debug", skip(source_files))]
 pub fn source_files_to_tabs(
-    source_files: impl Iterator<Item = StatefulFile<Box<[u8]>>>,
+    source_files: impl IntoIterator<Item = FileData<Box<[u8]>>>,
 ) -> impl Iterator<Item = pico_8_cart_model::Tab<'static>> {
     let mut line_number = 0;
-    source_files.map(move |source_file| {
+    source_files.into_iter().map(move |source_file| {
         tracing::debug!("Currently processing file {:?}", source_file.as_path());
         let file_data = source_file.unwrap_loaded_data_deref();
         let lines_in_file = bytes::NewlineIter::from(file_data).count();
@@ -265,9 +269,10 @@ pub fn source_files_to_tabs(
 
 #[tracing::instrument(level = "debug", skip(tabs))]
 pub fn compile_tabs<'a>(
-    tabs: impl Iterator<Item = pico_8_cart_model::Tab<'a>>,
+    tabs: impl IntoIterator<Item = pico_8_cart_model::Tab<'a>>,
 ) -> pico_8_cart_model::CodeTabs<'a> {
-    tabs.enumerate()
+    tabs.into_iter()
+        .enumerate()
         .fold(Default::default(), |mut tabs, (tab_index, code_tab)| {
             tracing::info!("compiling tab {tab_index}");
             tabs[tab_index] = Some(code_tab);
@@ -277,14 +282,14 @@ pub fn compile_tabs<'a>(
 
 #[tracing::instrument(level = "debug", skip(source_files))]
 fn compile_source_files_to_tabs(
-    source_files: impl Iterator<Item = StatefulFile<Box<[u8]>>>,
+    source_files: impl IntoIterator<Item = FileData<Box<[u8]>>>,
 ) -> pico_8_cart_model::CodeTabs<'static> {
     compile_tabs(source_files_to_tabs(source_files))
 }
 
 #[tracing::instrument(level = "debug", skip(dir_entries))]
 pub fn dir_entries_to_tabs(
-    dir_entries: impl Iterator<Item = fs::DirEntry>,
+    dir_entries: impl IntoIterator<Item = fs::DirEntry>,
 ) -> impl Iterator<Item = pico_8_cart_model::Tab<'static>> {
     source_files_to_tabs(dir_entries_to_source_files(dir_entries))
 }
@@ -310,7 +315,7 @@ pub fn get_source_tabs<P: AsRef<path::Path> + ?Sized>(
 }
 
 pub fn compile_tabs_to_cart_data<'a>(
-    tabs: impl Iterator<Item = pico_8_cart_model::Tab<'a>>,
+    tabs: impl IntoIterator<Item = pico_8_cart_model::Tab<'a>>,
 ) -> pico_8_cart_model::CartData<'a> {
     pico_8_cart_model::CartData::default_with_code_tabs(compile_tabs(tabs))
 }
@@ -330,7 +335,7 @@ where
         Self: Sized,
     {
         tracing::debug!(
-            "Loading boxed data {} from file",
+            "Loading boxed data {} from file {file:?}",
             core::any::type_name::<T>()
         );
         T::from_file(file).map(Box::from)
@@ -342,6 +347,7 @@ impl FromFile for Vec<u8> {
     where
         Self: Sized,
     {
+        tracing::debug!("Loading byte-vector from file {file:?}");
         let mut buf = vec![];
         io::Read::read_to_end(&mut file, &mut buf)
             .inspect_err(|e| tracing::error!("failed to read source-file to end: {e}"))?;
@@ -355,6 +361,7 @@ impl FromFile for Box<[u8]> {
     where
         Self: Sized,
     {
+        tracing::debug!("Loading boxed slice from file {file:?}");
         Vec::from_file(file).map(Vec::into_boxed_slice)
     }
 }
@@ -364,37 +371,37 @@ impl FromFile for pico_8_cart_model::CartData<'static> {
     where
         Self: Sized,
     {
-        tracing::debug!("Loading cart-data from file");
+        tracing::debug!("Loading cart-data from file {file:?}");
         pico_8_cart_model::CartData::from_file(file)
             .inspect_err(|e| tracing::error!("Failed to load cart-data from file: {e}"))
     }
 }
 
 #[derive(Clone, Debug)]
-pub enum StatefulFile<T> {
+pub enum FileData<T> {
     Unloaded(path::PathBuf),
     Loaded { path: path::PathBuf, data: T },
 }
 
-impl<T> StatefulFile<T> {
+impl<T> FileData<T> {
     /// Extracts the cart-data, or panics if the project-file is not loaded
     pub fn unwrap_loaded_data_ref(&self) -> &T {
         match self {
             // StatefulFile::NonExistent => panic!("called `unwrap_loaded_ref` on a non-existent project-file"),
-            StatefulFile::Unloaded(_) => {
+            FileData::Unloaded(_) => {
                 panic!("called `unwrap_loaded_data_ref` on an unloaded stateful-file")
             }
-            StatefulFile::Loaded { data, .. } => data,
+            FileData::Loaded { data, .. } => data,
         }
     }
     /// Extracts the cart-data, or panics if the project-file is not loaded
     pub fn unwrap_loaded_data_mut(&mut self) -> &mut T {
         match self {
             // StatefulFile::NonExistent => panic!("called `unwrap_loaded_ref` on a non-existent project-file"),
-            StatefulFile::Unloaded(_) => {
+            FileData::Unloaded(_) => {
                 panic!("called `unwrap_loaded_data_ref` on an unloaded stateful-file")
             }
-            StatefulFile::Loaded { data, .. } => data,
+            FileData::Loaded { data, .. } => data,
         }
     }
     /// Extracts the cart-data, or panics if the project-file is not loaded
@@ -406,31 +413,32 @@ impl<T> StatefulFile<T> {
     {
         match self {
             // ProjectFile::NonExistent => panic!("called `unwrap_loaded_ref` on a non-existent project-file"),
-            StatefulFile::Unloaded(_) => {
+            FileData::Unloaded(_) => {
                 panic!("called `unwrap_loaded_data_deref` on an unloaded stateful-file")
             }
-            StatefulFile::Loaded { data, .. } => data,
+            FileData::Loaded { data, .. } => data,
         }
     }
     /// Extracts the cart-data, or panics if the project-file is not loaded
     pub fn unwrap_loaded_data(self) -> T {
         match self {
             // StatefulFile::NonExistent => panic!("called `unwrap_loaded_ref` on a non-existent project-file"),
-            StatefulFile::Unloaded(_) => {
+            FileData::Unloaded(_) => {
                 panic!("called `unwrap_loaded_data_ref` on an unloaded stateful-file")
             }
-            StatefulFile::Loaded { data, .. } => data,
+            FileData::Loaded { data, .. } => data,
         }
     }
-    pub fn new<P: AsRef<path::Path> + ?Sized>(file_path: &P) -> StatefulFile<T> {
-        StatefulFile::Unloaded(file_path.as_ref().to_path_buf())
+    pub fn new<P: AsRef<path::Path> + ?Sized>(file_path: &P) -> FileData<T> {
+        FileData::Unloaded(file_path.as_ref().to_path_buf())
     }
+    #[tracing::instrument(level = "debug", skip(self))]
     pub fn load(&mut self) -> io::Result<()>
     where
         T: FromFile,
     {
         match self {
-            StatefulFile::Unloaded(path) => {
+            FileData::Unloaded(path) => {
                 tracing::debug!("Unloaded at {path:?}");
                 let data = fs::OpenOptions::new()
                     .create(true)
@@ -444,7 +452,7 @@ impl<T> StatefulFile<T> {
                     core::any::type_name_of_val(&data),
                     size_of_val(&data)
                 );
-                *self = StatefulFile::Loaded {
+                *self = FileData::Loaded {
                     path: path.to_path_buf(),
                     data,
                 };
@@ -458,7 +466,7 @@ impl<T> StatefulFile<T> {
         }
     }
     #[tracing::instrument(level = "debug", skip(self))]
-    pub fn into_loaded(mut self) -> io::Result<StatefulFile<T>>
+    pub fn into_loaded(mut self) -> io::Result<FileData<T>>
     where
         T: FromFile,
     {
@@ -469,8 +477,8 @@ impl<T> StatefulFile<T> {
 
     pub fn as_path(&self) -> &path::Path {
         match self {
-            StatefulFile::Unloaded(path) => path,
-            StatefulFile::Loaded { path, .. } => path,
+            FileData::Unloaded(path) => path,
+            FileData::Loaded { path, .. } => path,
         }
         .as_path()
     }
@@ -494,10 +502,10 @@ impl<T> StatefulFile<T> {
         self.as_path().file_stem().and_then(ffi::OsStr::to_str)
     }
     pub const fn is_loaded(&self) -> bool {
-        matches!(self, StatefulFile::Loaded { .. })
+        matches!(self, FileData::Loaded { .. })
     }
 }
-impl<T> StatefulFile<T>
+impl<T> FileData<T>
 where
     T: AsRef<[u8]> + IntoIterator<Item = u8>,
 {
@@ -523,14 +531,15 @@ where
         }
     }
 }
-impl<T> TryFrom<fs::DirEntry> for StatefulFile<T> {
+impl<T> TryFrom<fs::DirEntry> for FileData<T> {
     type Error = io::Error;
     #[tracing::instrument(level = "debug")]
     fn try_from(value: fs::DirEntry) -> Result<Self, Self::Error> {
         let path = value.path();
 
         if path.is_file() {
-            Ok(StatefulFile::Unloaded(path))
+            tracing::debug!("{path:?} is a file");
+            Ok(FileData::Unloaded(path))
         } else {
             Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -641,8 +650,8 @@ impl SourceFile {
 ///
 /// TODO: Proper merge-logic
 pub fn compile_cartridge(
-    cart_file: StatefulFile<Box<pico_8_cart_model::CartData<'static>>>,
-    source_files: impl Iterator<Item = StatefulFile<Box<[u8]>>>,
+    cart_file: FileData<Box<pico_8_cart_model::CartData<'static>>>,
+    source_files: impl Iterator<Item = FileData<Box<[u8]>>>,
 ) -> io::Result<pico_8_cart_model::CartData<'static>> {
     // construct the tabs
     let tabs = source_files_to_tabs(source_files);
@@ -687,11 +696,15 @@ struct P8CartData<'a> {
 }
 
 /// Returns the section-delimiters ordered by line-number
-#[tracing::instrument(skip(cart_src), ret)]
+#[tracing::instrument(level = "debug", skip(cart_src), ret)]
 fn get_section_delimiters(
     cart_src: &[u8],
     line_number_offset: Option<usize>,
 ) -> Vec<SectionDelimiter<'static>> {
+    tracing::debug!(
+        "getting section delimiters from cart_src.len()={}",
+        cart_src.len()
+    );
     let mut offset = 0;
     // add 1 to compensate non-zero start of file
     let line_number_offset = line_number_offset.unwrap_or_default() + 1;
@@ -818,7 +831,7 @@ fn get_sections(
 }
 
 impl<'a> P8CartData<'a> {
-    #[tracing::instrument(skip(cart_src))]
+    #[tracing::instrument(level = "debug", skip(cart_src))]
     fn get_from_lines(
         cart_src: &'a [u8],
         line_number_offset: Option<usize>,
