@@ -22,55 +22,6 @@ use pico_build_rs::FileData;
 /// The size of the log-panel in log-lines
 const LOG_LINE_COUNT: usize = 20;
 
-enum ProjectFile {
-    // NonExistent,
-    Unloaded(path::PathBuf),
-    Loaded {
-        path: path::PathBuf,
-        data: pico_8_cart_model::CartData<'static>,
-    },
-}
-
-impl ProjectFile {
-    /// Extracts the cart-data, or panics if the project-file is not loaded
-    pub fn unwrap_loaded_data_ref(&self) -> &pico_8_cart_model::CartData<'static> {
-        match self {
-            // ProjectFile::NonExistent => panic!("called `unwrap_loaded_ref` on a non-existent project-file"),
-            ProjectFile::Unloaded(_) => {
-                panic!("called `unwrap_loaded_ref` on an unloaded project-file")
-            }
-            ProjectFile::Loaded { data, .. } => data,
-        }
-    }
-    pub fn new<P: AsRef<path::Path> + ?Sized>(file_path: &P) -> ProjectFile {
-        ProjectFile::Unloaded(file_path.as_ref().to_path_buf())
-    }
-    pub fn load(&mut self) -> io::Result<()> {
-        match self {
-            ProjectFile::Unloaded(path) => {
-                let data = fs::OpenOptions::new()
-                    .create(true)
-                    .read(true)
-                    .write(true)
-                    .truncate(true)
-                    .open(path.as_path())
-                    .and_then(pico_8_cart_model::CartData::from_file)?;
-                *self = ProjectFile::Loaded {
-                    path: path.to_path_buf(),
-                    data,
-                };
-                // .map(|data| ProjectFile::Loaded { path, data })
-                Ok(())
-            }
-            _ => Ok(()),
-        }
-    }
-    pub fn into_loaded(mut self) -> io::Result<ProjectFile> {
-        self.load()?;
-        Ok(self)
-    }
-}
-
 struct ModelV2 {
     project_file: FileData<Box<pico_8_cart_model::CartData<'static>>>,
     source_directory: path::PathBuf,
@@ -99,7 +50,7 @@ impl ModelV2 {
     }
 
     /// Reads the stateful files into memory
-    fn read_source_files(&mut self) -> io::Result<()> {
+    fn read_source_files(&mut self) -> Result<(), pico_build_rs::FileDataError<Box<[u8]>>> {
         for source_file in self.source_files.iter_mut() {
             source_file.load()?;
         }
@@ -108,7 +59,7 @@ impl ModelV2 {
     }
 
     /// Loads all source files in the configured directory
-    fn load_source_files(&mut self) -> io::Result<()> {
+    fn load_source_files(&mut self) -> Result<(), pico_build_rs::FileDataError<Box<[u8]>>> {
         let source_files = self.discover_source_files().map(Box::from_iter)?;
 
         self.source_files = source_files;
@@ -117,7 +68,10 @@ impl ModelV2 {
     }
 
     /// Creates or loads the project-file
-    fn load_project_file(&mut self) -> io::Result<()> {
+    fn load_project_file(
+        &mut self,
+    ) -> Result<(), pico_build_rs::FileDataError<Box<pico_8_cart_model::CartData<'static>>>> {
+        tracing::debug!("Loading project file");
         self.project_file.load()
     }
 
@@ -304,7 +258,7 @@ struct Model {
     src_dir: path::PathBuf,
     cart_path: path::PathBuf,
     /// Checked during the [`handle_event`] call
-    log_message_rx: mpsc::Receiver<String>,
+    log_message_rx: mpsc::Receiver<log_panel::VisitPayload>,
 
     /// An owned log-message
     log_messages: pico_build_rs::Fifo<Line<'static>>,
@@ -355,7 +309,7 @@ enum Message {
 /// Make a decision regarding how the model should change
 fn handle_event(model @ Model { log_message_rx, .. }: &Model) -> Option<Message> {
     if let Ok(log_message) = log_message_rx.try_recv() {
-        return Some(Message::IncomingLogLine(log_message.into()));
+        return Some(Message::IncomingLogLine(log_message.to_string().into()));
     };
 
     match event::poll(Duration::from_millis(10)) {
@@ -448,20 +402,25 @@ fn update(
             }
             .filter_map(|source_entry| {
                 FileData::try_from(source_entry)
-                    .inspect_err(|e| tracing::error!("Failed to convert source-entry: {e}"))
-                    .and_then(FileData::into_loaded)
+                    .map_err(pico_build_rs::FileDataError::Io)
+                    .inspect_err(|e| tracing::error!("Failed to convert source-entry: {e:?}"))
+                    .and_then(FileData::into_loaded_or_default)
                     .ok()
             });
             match FileData::new(cart_path.as_path())
-                .into_loaded()
-                .and_then(|cart_file| pico_build_rs::compile_cartridge(cart_file, source_files))
-            {
-                Ok(cart) => Some(Message::CompilationOutput {
-                    compiled_data: Box::new(cart),
-                    cart_path,
-                }),
+                .into_loaded_or_default()
+                .and_then(|cart_file| {
+                    pico_build_rs::compile_cartridge(cart_file, source_files).map_err(Into::into)
+                }) {
+                Ok(cart) => {
+                    tracing::info!("Got cart-data");
+                    Some(Message::CompilationOutput {
+                        compiled_data: Box::new(cart),
+                        cart_path,
+                    })
+                }
                 Err(e) => {
-                    tracing::error!("Failed to compile {e}");
+                    tracing::error!("Failed to compile {e:?}");
                     None
                 }
             }

@@ -48,9 +48,10 @@ fn open_cartridge_file<P: AsRef<path::Path>>(file_name: P) -> Option<fs::File> {
 
 fn read_cartridge_file<P: AsRef<path::Path>>(
     file_name: P,
-) -> Option<pico_build_rs::P8Cart<'static>> {
-    let mut cartridge_file = open_cartridge_file(file_name)?;
-    pico_build_rs::P8Cart::try_from_reader(&mut cartridge_file)
-        .inspect_err(|e| tracing::warn!("Failed to read cartridge file: {e}"))
-        .ok()
+) -> Option<pico_8_cart_model::CartData<'static>> {
+    open_cartridge_file(file_name).and_then(|cartridge_file| {
+        pico_8_cart_model::CartData::from_file(cartridge_file)
+            .inspect_err(|e| tracing::warn!("Failed to read cartridge file: {e}"))
+            .ok()
+    })
 }

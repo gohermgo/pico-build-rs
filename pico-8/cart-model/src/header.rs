@@ -3,6 +3,8 @@ use core::fmt;
 use core::mem::transmute;
 use core::ops::Deref;
 
+use alloc::borrow::Cow;
+
 // use crate::bytes;
 
 // Type definitions,
@@ -162,6 +164,47 @@ impl fmt::Debug for HeaderBuf {
     }
 }
 
+#[derive(Debug)]
+pub enum HeaderError<'a> {
+    MalformedCartridgeMarker(Cow<'a, [u8]>),
+    InvalidVersion(Cow<'a, [u8]>),
+    NotEnoughData(Cow<'a, [u8]>),
+}
+
+impl HeaderError<'_> {
+    pub fn into_owned(self) -> HeaderError<'static> {
+        match self {
+            HeaderError::MalformedCartridgeMarker(cow) => {
+                HeaderError::MalformedCartridgeMarker(Cow::Owned(cow.into_owned()))
+            }
+            HeaderError::InvalidVersion(cow) => {
+                HeaderError::InvalidVersion(Cow::Owned(cow.into_owned()))
+            }
+            HeaderError::NotEnoughData(cow) => {
+                HeaderError::NotEnoughData(Cow::Owned(cow.into_owned()))
+            }
+        }
+    }
+}
+
+impl core::fmt::Display for HeaderError<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let description = "Header error";
+        let reason = match self {
+            HeaderError::MalformedCartridgeMarker(actual) => {
+                format!("malformed cartridge marker {actual:?}")
+            }
+            HeaderError::InvalidVersion(actual) => {
+                format!("invalid utf8 in version data {actual:?}")
+            }
+            HeaderError::NotEnoughData(value) => format!("not enough input data {value:?}"),
+        };
+        f.write_fmt(format_args!("{description}: {reason}"))
+    }
+}
+
+impl core::error::Error for HeaderError<'_> {}
+
 #[tracing::instrument(level = "debug", skip(src))]
 pub fn split_from<T: AsRef<[u8]> + ?Sized>(src: &T) -> Option<(&Header, &[u8])> {
     // Stash slice for later use
@@ -188,6 +231,41 @@ pub fn split_from<T: AsRef<[u8]> + ?Sized>(src: &T) -> Option<(&Header, &[u8])> 
     let header = unsafe { Header::from_slice(slice) };
     tracing::debug!("{header:?}");
     Some((header, remainder))
+}
+
+#[tracing::instrument(level = "debug", skip(src))]
+pub fn try_split_from<T: AsRef<[u8]> + ?Sized>(
+    src: &T,
+) -> Result<(&Header, &[u8]), HeaderError<'_>> {
+    // Stash slice for later use
+    let slice = src.as_ref();
+
+    // Make iterator for taking some lines off
+    let mut nl_iter = bytes::NewlineIter::new(slice);
+
+    // Assert marker
+    let CARTRIDGE_MARKER = nl_iter
+        .next_const()
+        .ok_or(HeaderError::NotEnoughData(Cow::Borrowed(slice)))?
+    else {
+        panic!("encountered malformed cartridge marker in header");
+    };
+
+    // Check if version is valid utf-8 (minimal correctness check)
+    let version = nl_iter
+        .next_const()
+        .ok_or(HeaderError::NotEnoughData(Cow::Borrowed(slice)))?;
+    if core::str::from_utf8(version).is_err() {
+        tracing::warn!("Invalid utf-8 in version-bytes: {version:?}");
+        return Err(HeaderError::InvalidVersion(Cow::Borrowed(version)));
+    }
+
+    let header_len = CARTRIDGE_MARKER.len() + version.len();
+    let (slice, remainder) = slice.split_at(header_len);
+
+    let header = unsafe { Header::from_slice(slice) };
+    tracing::debug!("{header:?}");
+    Ok((header, remainder))
 }
 
 #[cfg(test)]

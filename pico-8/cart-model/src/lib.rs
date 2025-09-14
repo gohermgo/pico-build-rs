@@ -48,10 +48,10 @@ pub fn get_section_delimiters(
 #[tracing::instrument(level = "debug", skip(cart_src, delimiters))]
 pub fn get_sections(
     cart_src: &[u8],
-    delimiters: impl Iterator<Item = SectionDelimiter>,
+    delimiters: impl IntoIterator<Item = SectionDelimiter>,
 ) -> impl Iterator<Item = Section<'_>> + '_ {
     // Collect so that we may sort
-    let mut sorted_delimiters: Vec<SectionDelimiter> = delimiters.collect();
+    let mut sorted_delimiters = Vec::from_iter(delimiters);
 
     // Sort so that we iterate in line with line-numbers
     sorted_delimiters.sort();
@@ -378,6 +378,52 @@ impl fmt::Debug for CartData<'_> {
             .finish()
     }
 }
+
+#[derive(Debug)]
+pub enum CartDataError<'a> {
+    Header(header::HeaderError<'a>),
+    MissingGfxSection,
+    Io(io::Error),
+}
+
+impl CartDataError<'_> {
+    pub fn into_owned(self) -> CartDataError<'static> {
+        match self {
+            CartDataError::Header(header_error) => CartDataError::Header(header_error.into_owned()),
+            CartDataError::MissingGfxSection => CartDataError::MissingGfxSection,
+            CartDataError::Io(e) => CartDataError::Io(e),
+        }
+    }
+}
+
+impl<'a> From<header::HeaderError<'a>> for CartDataError<'a> {
+    fn from(v: header::HeaderError<'a>) -> Self {
+        Self::Header(v)
+    }
+}
+
+impl From<io::Error> for CartDataError<'_> {
+    fn from(v: io::Error) -> Self {
+        Self::Io(v)
+    }
+}
+
+impl core::fmt::Display for CartDataError<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let description = "Cart data error";
+        let reason = match self {
+            CartDataError::Header(e) => e.to_string(),
+            CartDataError::MissingGfxSection => "missing gfx-section".to_string(),
+            CartDataError::Io(e) => e.to_string(),
+        };
+        f.write_fmt(format_args!("{description}: {reason}"))
+    }
+}
+
+impl core::error::Error for CartDataError<'_> {}
+
+pub type CartDataResult<'a, T> = Result<T, CartDataError<'a>>;
+
 impl<'a> CartData<'a> {
     pub fn into_owned(self) -> CartData<'static> {
         let CartData {
@@ -406,19 +452,28 @@ impl<'a> CartData<'a> {
         }
     }
     #[tracing::instrument(level = "trace")]
-    pub fn from_file(mut cart_file: fs::File) -> io::Result<CartData<'static>> {
+    pub fn from_file(mut cart_file: fs::File) -> Result<CartData<'static>, CartDataError<'static>> {
         let mut cart_source = vec![];
 
         io::Read::read_to_end(&mut cart_file, &mut cart_source)?;
 
-        CartData::from_cart_source(cart_source.as_slice()).map(CartData::into_owned)
+        tracing::debug!(
+            "{} bytes of cart-data in file {cart_file:?}",
+            cart_source.len()
+        );
+
+        CartData::from_cart_source(cart_source.as_slice())
+            .map(CartData::into_owned)
+            .map_err(CartDataError::into_owned)
     }
     #[tracing::instrument(level = "trace", skip(path))]
     pub fn from_path_or_default<P: AsRef<path::Path> + ?Sized>(
         path: &P,
-    ) -> io::Result<CartData<'static>> {
+    ) -> Result<CartData<'static>, CartDataError<'static>> {
         if path.as_ref().exists() {
-            fs::File::open(path).and_then(CartData::from_file)
+            fs::File::open(path)
+                .map_err(Into::into)
+                .and_then(CartData::from_file)
         } else {
             Ok(CartData::default())
         }
@@ -430,28 +485,32 @@ impl<'a> CartData<'a> {
         }
     }
     #[tracing::instrument(level = "trace", skip(cart_src))]
-    pub fn from_cart_source(cart_src: &'a [u8]) -> io::Result<CartData<'a>> {
+    pub fn from_cart_source(cart_src: &'a [u8]) -> Result<CartData<'a>, CartDataError<'a>> {
         tracing::debug!("FROM SOURCE");
-        let (header, remainder) = header::split_from(cart_src).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "Failed to parse header from cart-source of {} bytes",
-                    cart_src.len()
-                ),
-            )
-        })?;
+        let (header, remainder) =
+            header::try_split_from(cart_src).inspect_err(|e| tracing::error!("{e}"))?;
 
+        //     .ok_or_else(|| {
+        //     io::Error::new(
+        //         io::ErrorKind::InvalidData,
+        //         format!(
+        //             "Failed to parse header from cart-source of {} bytes",
+        //             cart_src.len()
+        //         ),
+        //     )
+        // })?;
+        tracing::debug!("header={:?}; remainder.len()={}", header, remainder.len());
         CartDataBuilder::from_iter(get_sections(
             remainder,
             get_section_delimiters(remainder, Some(2)),
         ))
         .build_with(header)
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Gfx was missing when building cart (or something else idk really)",
-            )
+        .ok_or({
+            CartDataError::MissingGfxSection
+            // io::Error::new(
+            //     io::ErrorKind::InvalidData,
+            //     "Gfx was missing when building cart (or something else idk really)",
+            // )
         })
     }
     /// Caution, will overwrite entirely
@@ -541,8 +600,7 @@ impl<'a> CartData<'a> {
 }
 impl Default for CartData<'static> {
     fn default() -> Self {
-        const DEFAULT_GFX: &[u8] = br"__gfx__
-00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+        const DEFAULT_GFX: &[u8] = br"00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 00700700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
 00077000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
@@ -662,6 +720,7 @@ impl<'a> FromIterator<Section<'a>> for CartDataBuilder<'a> {
 
 impl<'a> CartDataBuilder<'a> {
     /// requires header to start
+    #[tracing::instrument(level = "debug")]
     fn build_with(self, header: &'a Header) -> Option<CartData<'a>> {
         let CartDataBuilder {
             label,
