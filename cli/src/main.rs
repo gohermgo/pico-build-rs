@@ -17,7 +17,7 @@ mod log_panel;
 
 use log_panel::LogPanelWidget;
 
-use pico_build_rs::StatefulFile;
+use pico_build_rs::FileData;
 
 /// The size of the log-panel in log-lines
 const LOG_LINE_COUNT: usize = 20;
@@ -72,15 +72,15 @@ impl ProjectFile {
 }
 
 struct ModelV2 {
-    project_file: StatefulFile<Box<pico_8_cart_model::CartData<'static>>>,
+    project_file: FileData<Box<pico_8_cart_model::CartData<'static>>>,
     source_directory: path::PathBuf,
-    source_files: Box<[StatefulFile<Box<[u8]>>]>,
+    source_files: Box<[FileData<Box<[u8]>>]>,
     running_state: RunningState,
 }
 
 impl ModelV2 {
     fn new(cfg: config::AppConfiguration) -> io::Result<ModelV2> {
-        let project_file = StatefulFile::new(&cfg.cart_path());
+        let project_file = FileData::new(&cfg.cart_path());
 
         let mut app = ModelV2 {
             project_file,
@@ -93,7 +93,7 @@ impl ModelV2 {
     }
 
     /// Discovers all source files in the configured directory
-    fn discover_source_files(&self) -> io::Result<impl Iterator<Item = StatefulFile<Box<[u8]>>>> {
+    fn discover_source_files(&self) -> io::Result<impl Iterator<Item = FileData<Box<[u8]>>>> {
         pico_build_rs::get_lua_files(self.source_directory.as_path())
             .map(pico_build_rs::dir_entries_to_source_files)
     }
@@ -133,7 +133,7 @@ impl ModelV2 {
             ));
         }
 
-        if !self.source_files.iter().all(StatefulFile::is_loaded) {
+        if !self.source_files.iter().all(FileData::is_loaded) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "Not all source-files are loaded",
@@ -164,7 +164,7 @@ fn main() -> anyhow::Result<()> {
     tracing::info!("cart path is {:?}", cart_path);
     let mut terminal = ratatui::init();
     let log_lines: [Line<'static>; LOG_LINE_COUNT] = core::array::from_fn(|_| Line::default());
-    let log_messages = pico_build_rs::ScrollBuffer::from(Box::from(log_lines));
+    let log_messages = pico_build_rs::Fifo::from(Box::from(log_lines));
     let log_panel_chunk = get_rect(&mut terminal.get_frame(), log_messages.len())[0];
     let mut model = Model {
         src_dir: cfg.src_dir.clone(),
@@ -307,7 +307,7 @@ struct Model {
     log_message_rx: mpsc::Receiver<String>,
 
     /// An owned log-message
-    log_messages: pico_build_rs::ScrollBuffer<Line<'static>>,
+    log_messages: pico_build_rs::Fifo<Line<'static>>,
     /// The implied capacity for log-messages
     log_message_capacity: usize,
 
@@ -447,12 +447,12 @@ fn update(
                 }
             }
             .filter_map(|source_entry| {
-                StatefulFile::try_from(source_entry)
+                FileData::try_from(source_entry)
                     .inspect_err(|e| tracing::error!("Failed to convert source-entry: {e}"))
-                    .and_then(StatefulFile::into_loaded)
+                    .and_then(FileData::into_loaded)
                     .ok()
             });
-            match StatefulFile::new(cart_path.as_path())
+            match FileData::new(cart_path.as_path())
                 .into_loaded()
                 .and_then(|cart_file| pico_build_rs::compile_cartridge(cart_file, source_files))
             {
