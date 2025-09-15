@@ -137,7 +137,10 @@ fn main() -> anyhow::Result<()> {
 
         while current_message.is_some() {
             current_message = update(&mut model, current_message.unwrap());
-            if matches!(current_message.as_ref(), Some(&Message::ClearLog)) {
+            if matches!(
+                current_message.as_ref(),
+                Some(&Message::Input(InputMessage::ClearLog))
+            ) {
                 // terminal.swap_buffers();
                 // let rect = get_rect(&mut terminal.get_frame())[1];
                 // let mut frame = terminal.get_frame();
@@ -270,32 +273,44 @@ enum RunningState {
     Done,
     Running,
 }
+/// A user-command
+#[derive(Debug)]
+enum InputMessage {
+    /// A request to analyze the cartridge was made
+    Analyze {
+        cart_path: path::PathBuf,
+    },
+    /// A request to compile the cartridge was made
+    Compile {
+        src_dir: path::PathBuf,
+        cart_path: path::PathBuf,
+    },
+    /// A request to quit was made
+    Quit,
+
+    ClearLog,
+}
 /// A statement about how the model should change
 #[derive(Debug)]
 enum Message {
+    Input(InputMessage),
     // /// A request to open
     // OpenCartridge {
     //     cartridge_directory_path: path::PathBuf,
     // },
-    /// A request to compile the cartridge was made
-    CompileCartridge {
-        src_dir: path::PathBuf,
-        cart_path: path::PathBuf,
-    },
-
+    // /// A request to compile the cartridge was made
+    // CompileCartridge {
+    //     src_dir: path::PathBuf,
+    //     cart_path: path::PathBuf,
+    // },
     /// The compilation-request finished successfully
     CompilationOutput {
         compiled_data: Box<pico_8_cart_model::CartData<'static>>,
         cart_path: path::PathBuf,
     },
 
-    /// A request to quit was made
-    Quit,
-
     /// A log-line has arrived
     IncomingLogLine(LogLine),
-
-    ClearLog,
 }
 
 // struct Message {
@@ -315,7 +330,7 @@ fn handle_event(model @ Model { log_message_rx, .. }: &Model) -> Option<Message>
         Err(_) | Ok(false) => None,
         Ok(true) => {
             if let Ok(Event::Key(key)) = event::read() {
-                handle_key(model, key)
+                handle_key(model, key).map(Message::Input)
             } else {
                 None
             }
@@ -327,14 +342,14 @@ fn handle_key(
         src_dir, cart_path, ..
     }: &Model,
     key: KeyEvent,
-) -> Option<Message> {
+) -> Option<InputMessage> {
     match key.code {
-        KeyCode::Enter if key.is_press() => Some(Message::CompileCartridge {
+        KeyCode::Enter if key.is_press() => Some(InputMessage::Compile {
             src_dir: src_dir.clone(),
             cart_path: cart_path.clone(),
         }),
-        KeyCode::Char('q' | 'Q') => Some(Message::Quit),
-        KeyCode::Char('c' | 'C') => Some(Message::ClearLog),
+        KeyCode::Char('q' | 'Q') => Some(InputMessage::Quit),
+        KeyCode::Char('c' | 'C') => Some(InputMessage::ClearLog),
         _ => None,
     }
 }
@@ -349,57 +364,65 @@ fn update(
     message: Message,
 ) -> Option<Message> {
     match message {
-        Message::ClearLog => {
-            for message in log_messages.iter_mut() {
-                *message = Line::default();
+        Message::Input(input_message) => match input_message {
+            InputMessage::ClearLog => {
+                for message in log_messages.iter_mut() {
+                    *message = Line::default();
+                }
+                log_messages.reset_cursor();
+                None
             }
-            log_messages.reset_cursor();
-            None
-        }
 
-        Message::CompileCartridge { src_dir, cart_path } => {
-            tracing::info!("Writing to cart-path {cart_path:?}");
-            let source_files = match pico_build_rs::get_lua_files(src_dir.as_path()) {
-                Ok(files) => files.inspect(|entry| {
-                    let path = entry.path();
-                    let name = path
-                        .file_name()
-                        .map(|file_name| file_name.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    file_loading_tracker
-                        .paths
-                        .insert(name, FileLoadingState::Opened(path));
-                }),
-                Err(e) => {
-                    tracing::error!("Failed to get lua files {e}");
-                    return None;
+            InputMessage::Compile { src_dir, cart_path } => {
+                tracing::info!("Writing to cart-path {cart_path:?}");
+                let source_files = match pico_build_rs::get_lua_files(src_dir.as_path()) {
+                    Ok(files) => files.inspect(|entry| {
+                        let path = entry.path();
+                        let name = path
+                            .file_name()
+                            .map(|file_name| file_name.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        file_loading_tracker
+                            .paths
+                            .insert(name, FileLoadingState::Opened(path));
+                    }),
+                    Err(e) => {
+                        tracing::error!("Failed to get lua files {e}");
+                        return None;
+                    }
+                }
+                .filter_map(|source_entry| {
+                    FileData::try_from(source_entry)
+                        .map_err(pico_build_rs::FileDataError::Io)
+                        .inspect_err(|e| tracing::error!("Failed to convert source-entry: {e:?}"))
+                        .and_then(FileData::into_loaded_or_default)
+                        .ok()
+                });
+                match FileData::new(cart_path.as_path())
+                    .into_loaded_or_default()
+                    .and_then(|cart_file| {
+                        pico_build_rs::compile_cartridge(cart_file, source_files)
+                            .map_err(Into::into)
+                    }) {
+                    Ok(cart) => {
+                        tracing::info!("Got cart-data");
+                        Some(Message::CompilationOutput {
+                            compiled_data: Box::new(cart),
+                            cart_path,
+                        })
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to compile {e:?}");
+                        None
+                    }
                 }
             }
-            .filter_map(|source_entry| {
-                FileData::try_from(source_entry)
-                    .map_err(pico_build_rs::FileDataError::Io)
-                    .inspect_err(|e| tracing::error!("Failed to convert source-entry: {e:?}"))
-                    .and_then(FileData::into_loaded_or_default)
-                    .ok()
-            });
-            match FileData::new(cart_path.as_path())
-                .into_loaded_or_default()
-                .and_then(|cart_file| {
-                    pico_build_rs::compile_cartridge(cart_file, source_files).map_err(Into::into)
-                }) {
-                Ok(cart) => {
-                    tracing::info!("Got cart-data");
-                    Some(Message::CompilationOutput {
-                        compiled_data: Box::new(cart),
-                        cart_path,
-                    })
-                }
-                Err(e) => {
-                    tracing::error!("Failed to compile {e:?}");
-                    None
-                }
+            InputMessage::Analyze { cart_path } => todo!("implement analyze"),
+            InputMessage::Quit => {
+                *running_state = RunningState::Done;
+                None
             }
-        }
+        },
         Message::CompilationOutput {
             compiled_data: cart,
             cart_path,
@@ -427,10 +450,6 @@ fn update(
                     None
                 }
             }
-        }
-        Message::Quit => {
-            *running_state = RunningState::Done;
-            None
         }
         Message::IncomingLogLine(log_message) => {
             log_messages.overwrite(log_message);
