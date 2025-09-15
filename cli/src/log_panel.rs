@@ -1,12 +1,92 @@
 use core::fmt;
+use core::ops::{Deref, DerefMut};
 
 use std::sync::mpsc;
 
-use ratatui::prelude::*;
+use pico_build_rs::Fifo;
+use ratatui::{
+    prelude::*,
+    widgets::{Block, Padding, Paragraph},
+};
 use tracing::Subscriber;
 use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::{Layer, SubscriberExt};
 use tracing_subscriber::util::SubscriberInitExt;
+
+#[derive(Debug)]
+pub struct LogPanelStore {
+    buf: Fifo<Line<'static>>,
+}
+
+impl Deref for LogPanelStore {
+    type Target = Fifo<Line<'static>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.buf
+    }
+}
+
+// impl DerefMut for LogPanelStore {
+//     fn deref_mut(&mut self) -> &mut Self::Target {
+//         &mut self.buf
+//     }
+// }
+
+impl FromIterator<Line<'static>> for LogPanelStore {
+    fn from_iter<T: IntoIterator<Item = Line<'static>>>(iter: T) -> Self {
+        let buf = Box::from_iter(iter);
+        let buf = Fifo::from(buf);
+        LogPanelStore { buf }
+    }
+}
+
+impl Default for LogPanelStore {
+    fn default() -> Self {
+        let arr: [Line<'static>; LINE_COUNT] = core::array::from_fn(|_| Line::default());
+        LogPanelStore {
+            buf: Fifo::from_iter(arr),
+        }
+    }
+}
+
+impl LogPanelStore {
+    pub fn clear(&mut self) {
+        for log_line in self.buf.iter_mut() {
+            *log_line = Line::default();
+        }
+        self.buf.reset_cursor();
+    }
+    pub fn update(&mut self, log_event: LogEvent) {
+        self.buf.overwrite(Line::from(log_event));
+    }
+}
+
+#[derive(Debug)]
+pub enum LogPanelAction {
+    HandleIncoming(LogEvent),
+    Clear,
+}
+
+// impl crate::StoreUpdate for LogPanelStore {
+//     type Action = LogPanelAction;
+
+//     #[tracing::instrument(level = "debug", skip(self))]
+//     fn update(&mut self, action: Self::Action) {
+//         match action {
+//             LogPanelAction::HandleIncoming(incoming_payload) => {
+//                 self.buf.overwrite(Line::from(incoming_payload));
+//                 Some(crate::Message::LogUpdated)
+//             }
+//             LogPanelAction::Clear => {
+//                 for log_line in self.buf.iter_mut() {
+//                     *log_line = Line::default();
+//                 }
+//                 self.buf.reset_cursor();
+//                 Some(crate::Message::LogCleared)
+//             }
+//         }
+//     }
+// }
 
 pub struct LogPanelWidget {
     log_lines: Vec<Line<'static>>,
@@ -24,16 +104,148 @@ impl FromIterator<Line<'static>> for LogPanelWidget {
         LogPanelWidget::from(log_lines)
     }
 }
+pub fn get_block() -> Block<'static> {
+    Block::bordered().title("log-panel")
+}
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct LogPanelBlock<'a> {
+    inner: Block<'a>,
+    log_panel_lines: usize,
+}
 
+impl<'a> Deref for LogPanelBlock<'a> {
+    type Target = Block<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+/// The size of the log-panel in log-lines
+pub const LINE_COUNT: usize = 20;
+
+impl Default for LogPanelBlock<'_> {
+    fn default() -> Self {
+        LogPanelBlock {
+            inner: Block::bordered().title("log-panel"),
+            log_panel_lines: LINE_COUNT,
+        }
+    }
+}
+
+impl<'a> Widget for &LogPanelBlock<'a> {
+    fn render(self, area: Rect, buf: &mut Buffer)
+    where
+        Self: Sized,
+    {
+        let LogPanelBlock { inner, .. } = self;
+        inner.render(area, buf);
+    }
+}
+impl<'a> Widget for LogPanelBlock<'a> {
+    fn render(self, area: Rect, buf: &mut Buffer)
+    where
+        Self: Sized,
+    {
+        <&LogPanelBlock<'a> as Widget>::render(&self, area, buf);
+    }
+}
+
+trait ImplementationSpecificBlock<'a>: Deref<Target = Block<'a>> {
+    fn get_rect(&self, frame: &mut Frame<'_>) -> Rect;
+    fn get_enclosed_area_in(&self, frame: &mut Frame<'_>) -> Rect {
+        self.deref().inner(self.get_rect(frame))
+    }
+}
+
+impl<'a> ImplementationSpecificBlock<'a> for LogPanelBlock<'a> {
+    fn get_rect(&self, frame: &mut Frame<'_>) -> Rect {
+        crate::get_ui_rects(frame, self.log_panel_lines)[RECT_INDEX]
+    }
+}
+
+pub const RECT_INDEX: usize = 1;
+/// Returns the rectangle enclosed in the block
+fn get_rect(frame: &mut Frame, log_panel_lines: usize) -> Rect {
+    get_rect_from_area(crate::get_ui_rects(frame, log_panel_lines)[RECT_INDEX])
+}
+fn get_rect_from_area(log_panel_area: Rect) -> Rect {
+    get_block().inner(log_panel_area)
+}
+
+trait ImplementationSpecificParagraph<'text, 'block>: Deref<Target = Paragraph<'text>> {
+    fn get_block(&self) -> Option<&dyn ImplementationSpecificBlock<'block>> {
+        None
+    }
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let paragraph = self.deref().clone();
+        let area = if let Some(block) = self.get_block() {
+            let inner_block = block.deref();
+            inner_block.render(area, buf);
+            inner_block.inner(area).intersection(area)
+        } else {
+            area
+        };
+        // let (paragraph, inner_area) = if let Some(block) = self.get_block() {
+        //     let inner_block = block.deref();
+        //     let inner_area = inner_block.inner(area);
+        //     (paragraph.block(inner_block.clone()), inner_area)
+        // } else {
+        //     (paragraph, area)
+        // };
+        // let paragraph = paragraph.scroll((2, 0));
+        paragraph.render(area, buf);
+    }
+}
+
+struct LogPanelParagraph<'text, 'block> {
+    inner: Paragraph<'text>,
+    block: LogPanelBlock<'block>,
+}
+
+impl<'text> Deref for LogPanelParagraph<'text, '_> {
+    type Target = Paragraph<'text>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<'a> LogPanelParagraph<'a, 'static> {
+    pub fn new<T: Into<Text<'a>>>(text: T) -> LogPanelParagraph<'a, 'static> {
+        LogPanelParagraph {
+            inner: Paragraph::new(text).scroll((2, 0)),
+            block: LogPanelBlock::default(),
+        }
+    }
+}
+
+impl<'text, 'block> ImplementationSpecificParagraph<'text, 'block>
+    for LogPanelParagraph<'text, 'block>
+{
+    fn get_block(&self) -> Option<&dyn ImplementationSpecificBlock<'block>> {
+        Some(&self.block)
+    }
+}
+
+// fn get_log_panel_rect(frame: &mut Frame, log_panel_lines: usize) -> Rect {
+//     log_panel::get_block().inner(crate::get_ui_rects(frame, log_panel_lines)[RECT_INDEX])
+// }
 impl Widget for LogPanelWidget {
     fn render(self, area: Rect, buf: &mut Buffer)
     where
         Self: Sized,
     {
-        use ratatui::widgets::{Block, Paragraph};
-        Paragraph::new(self.log_lines)
-            .block(Block::bordered().title("log-panel"))
-            .render(area, buf)
+        // use ratatui::widgets::Paragraph;
+        let paragraph = LogPanelParagraph::new(self.log_lines);
+        paragraph.render(area, buf);
+        // let border_block = LogPanelBlock::default();
+        // let text_area = border_block.get_enclosed_area_in(area);
+        // border_block.render(area, buf);
+
+        // Paragraph::new(self.log_lines)
+        //     .block(get_block())
+        //     .render(area, buf)
     }
 }
 /// Just intercepts the messages and forwards them to the frontend bits
@@ -42,7 +254,7 @@ struct SenderLayer<T> {
     message_tx: mpsc::Sender<T>,
 }
 
-impl<S> Layer<S> for SenderLayer<VisitPayload>
+impl<S> Layer<S> for SenderLayer<LogEvent>
 where
     S: Subscriber,
 {
@@ -179,15 +391,15 @@ impl From<&VisitMetadata> for Line<'static> {
 }
 
 #[derive(Debug)]
-pub struct VisitPayload {
+pub struct LogEvent {
     field: Field,
     data: VisitData,
     metadata: Option<VisitMetadata>,
 }
 
-impl core::fmt::Display for VisitPayload {
+impl core::fmt::Display for LogEvent {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let VisitPayload {
+        let LogEvent {
             field,
             data,
             metadata,
@@ -234,19 +446,19 @@ impl From<VisitDataSpan<'_>> for Span<'static> {
     }
 }
 
-impl From<VisitPayload> for Line<'static> {
-    fn from(ref value: VisitPayload) -> Self {
-        value.into()
+impl From<LogEvent> for Line<'static> {
+    fn from(value: LogEvent) -> Self {
+        <&LogEvent as Into<Line<'static>>>::into(&value)
     }
 }
 
-impl From<&VisitPayload> for Line<'static> {
+impl From<&LogEvent> for Line<'static> {
     fn from(
-        VisitPayload {
+        LogEvent {
             field,
             data,
             metadata,
-        }: &VisitPayload,
+        }: &LogEvent,
     ) -> Self {
         let mut line_builder = if let Some(metadata) = metadata {
             Line::default().spans(
@@ -264,16 +476,16 @@ impl From<&VisitPayload> for Line<'static> {
     }
 }
 
-impl VisitPayload {
+impl LogEvent {
     pub fn new<'p, P: ?Sized>(
         field: &Field,
         metadata: Option<&tracing::Metadata<'static>>,
         payload_data: &'p P,
-    ) -> VisitPayload
+    ) -> LogEvent
     where
         VisitData: From<&'p P>,
     {
-        VisitPayload {
+        LogEvent {
             field: field.clone(),
             data: VisitData::from(payload_data),
             metadata: metadata.map(VisitMetadata::from),
@@ -287,14 +499,14 @@ struct SendingVisitor<'ctx, T> {
     metadata: Option<&'ctx tracing::Metadata<'static>>,
 }
 
-impl<'ctx> SendingVisitor<'ctx, VisitPayload> {
+impl SendingVisitor<'_, LogEvent> {
     fn send_payload<'p, P: ?Sized>(&self, field: &Field, payload_data: &'p P)
     where
         VisitData: From<&'p P>,
     {
         match self
             .message_tx
-            .send(VisitPayload::new(field, self.metadata, payload_data))
+            .send(LogEvent::new(field, self.metadata, payload_data))
         {
             Ok(_) => {}
             Err(e) => eprintln!("Failed to send event from sending-visitor: {e}"),
@@ -302,7 +514,7 @@ impl<'ctx> SendingVisitor<'ctx, VisitPayload> {
     }
 }
 
-impl Visit for SendingVisitor<'_, VisitPayload> {
+impl Visit for SendingVisitor<'_, LogEvent> {
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
         self.send_payload(field, value);
         // match self.send_payload(field, value) {
@@ -336,7 +548,7 @@ impl Visit for SendingVisitor<'_, VisitPayload> {
 }
 
 /// Returns a channel for the messages (u probably want em)
-pub fn setup_tracing_subscriber() -> mpsc::Receiver<VisitPayload> {
+pub fn setup_tracing_subscriber() -> mpsc::Receiver<LogEvent> {
     let (message_tx, message_rx) = mpsc::channel();
 
     tracing_subscriber::registry()
