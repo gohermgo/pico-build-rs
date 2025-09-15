@@ -8,24 +8,24 @@ use tracing::field::{Field, Visit};
 use tracing_subscriber::layer::{Layer, SubscriberExt};
 use tracing_subscriber::util::SubscriberInitExt;
 
-pub struct LogPanelWidget<'a> {
-    log_lines: Vec<Line<'a>>,
+pub struct LogPanelWidget {
+    log_lines: Vec<Line<'static>>,
 }
 
-impl<'a> From<Vec<Line<'a>>> for LogPanelWidget<'a> {
-    fn from(value: Vec<Line<'a>>) -> Self {
+impl From<Vec<Line<'static>>> for LogPanelWidget {
+    fn from(value: Vec<Line<'static>>) -> Self {
         LogPanelWidget { log_lines: value }
     }
 }
 
-impl<'a> FromIterator<Line<'a>> for LogPanelWidget<'a> {
-    fn from_iter<T: IntoIterator<Item = Line<'a>>>(iter: T) -> Self {
-        let log_lines: Vec<Line<'a>> = iter.into_iter().collect();
+impl FromIterator<Line<'static>> for LogPanelWidget {
+    fn from_iter<T: IntoIterator<Item = Line<'static>>>(iter: T) -> Self {
+        let log_lines: Vec<Line<'static>> = iter.into_iter().collect();
         LogPanelWidget::from(log_lines)
     }
 }
 
-impl Widget for LogPanelWidget<'_> {
+impl Widget for LogPanelWidget {
     fn render(self, area: Rect, buf: &mut Buffer)
     where
         Self: Sized,
@@ -231,6 +231,12 @@ impl From<VisitDataSpan<'_>> for Span<'static> {
             "message" => Span::raw(data_str),
             _ => Span::raw(format!("{field_name}={data_str}")),
         }
+    }
+}
+
+impl From<VisitPayload> for Line<'static> {
+    fn from(ref value: VisitPayload) -> Self {
+        value.into()
     }
 }
 
