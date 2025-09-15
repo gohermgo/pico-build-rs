@@ -518,7 +518,9 @@ impl<'a> CartData<'a> {
     pub fn set_code_data(&mut self, code_tabs: CodeTabs<'a>) {
         self.code_tabs = code_tabs;
     }
+    #[tracing::instrument(level = "debug")]
     pub fn into_cart_source<T: FromIterator<u8>>(self) -> T {
+        tracing::info!("into cart source");
         let CartData {
             header,
             label,

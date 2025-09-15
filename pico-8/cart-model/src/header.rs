@@ -248,7 +248,8 @@ pub fn try_split_from<T: AsRef<[u8]> + ?Sized>(
         .next_const()
         .ok_or(HeaderError::NotEnoughData(Cow::Borrowed(slice)))?
     else {
-        panic!("encountered malformed cartridge marker in header");
+        // panic!("encountered malformed cartridge marker in header");
+        return Err(HeaderError::MalformedCartridgeMarker(Cow::Borrowed(slice)));
     };
 
     // Check if version is valid utf-8 (minimal correctness check)
