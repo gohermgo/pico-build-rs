@@ -9,6 +9,7 @@ use std::sync::mpsc;
 
 use anyhow::anyhow;
 use clap::Parser;
+use pico_build_rs::Fifo;
 use ratatui::prelude::*;
 
 mod args;
@@ -22,22 +23,23 @@ use pico_build_rs::FileData;
 /// The size of the log-panel in log-lines
 const LOG_LINE_COUNT: usize = 20;
 
-struct ModelV2 {
+#[derive(Debug)]
+struct Workspace {
     project_file: FileData<Box<pico_8_cart_model::CartData<'static>>>,
     source_directory: path::PathBuf,
     source_files: Box<[FileData<Box<[u8]>>]>,
-    running_state: RunningState,
+    // running_state: RunningState,
 }
 
-impl ModelV2 {
-    fn new(cfg: config::AppConfiguration) -> io::Result<ModelV2> {
+impl Workspace {
+    fn new(cfg: config::AppConfiguration) -> io::Result<Workspace> {
         let project_file = FileData::new(&cfg.cart_path());
 
-        let mut app = ModelV2 {
+        let mut app = Workspace {
             project_file,
             source_directory: cfg.src_dir,
             source_files: Box::default(),
-            running_state: RunningState::Running,
+            // running_state: RunningState::Running,
         };
 
         Ok(app)
@@ -58,13 +60,22 @@ impl ModelV2 {
         Ok(())
     }
 
+    /// Rediscovers, but does not load source files in the configured directory
+    fn reset_source_files(&mut self) -> Result<(), pico_build_rs::FileDataError<Box<[u8]>>> {
+        let source_files = self.discover_source_files().map(Box::from_iter)?;
+        self.source_files = source_files;
+        Ok(())
+    }
+
     /// Loads all source files in the configured directory
     fn load_source_files(&mut self) -> Result<(), pico_build_rs::FileDataError<Box<[u8]>>> {
-        let source_files = self.discover_source_files().map(Box::from_iter)?;
-
-        self.source_files = source_files;
-
+        self.reset_source_files()?;
         self.read_source_files()
+    }
+
+    fn reset_project_file(&mut self) {
+        tracing::debug!("Resetting project file");
+        self.project_file.unload();
     }
 
     /// Creates or loads the project-file
@@ -101,6 +112,13 @@ impl ModelV2 {
     }
 }
 
+#[derive(Debug)]
+struct ModelV2 {
+    workspace: Workspace,
+    running_state: RunningState,
+    log_messages: Fifo<Line<'static>>,
+}
+
 #[tracing::instrument(level = "info", ret)]
 fn main() -> anyhow::Result<()> {
     use crate::args::AppArgs;
@@ -120,23 +138,35 @@ fn main() -> anyhow::Result<()> {
     let log_lines: [Line<'static>; LOG_LINE_COUNT] = core::array::from_fn(|_| Line::default());
     let log_messages = pico_build_rs::Fifo::from(Box::from(log_lines));
     let log_panel_chunk = get_rect(&mut terminal.get_frame(), log_messages.len())[0];
+    let _forwarding_thread = std::thread::spawn(|| {});
     let mut model = Model {
         src_dir: cfg.src_dir.clone(),
         cart_path,
-        log_message_rx: message_rx,
         log_messages,
         running_state: RunningState::Running,
         file_loading_tracker: FileLoadingTracker {
             paths: Default::default(),
         },
     };
+    fn next_message(message_rx: &mpsc::Receiver<log_panel::VisitPayload>) -> Option<Line<'static>> {
+        match message_rx.try_recv() {
+            Ok(val) => Some(Line::from(val)),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                eprintln!("Disconnected message_rx");
+                None
+            }
+            Err(_) => None,
+        }
+    }
     while !matches!(model.running_state, RunningState::Done) {
         terminal.draw(|frame| view(&model, frame))?;
 
-        let mut current_message = handle_event(&model);
+        let mut current_message = handle_event(&model)
+            .or_else(|| next_message(&message_rx).map(Message::IncomingLogLine));
 
         while current_message.is_some() {
-            current_message = update(&mut model, current_message.unwrap());
+            current_message = update(&mut model, current_message.unwrap())
+                .or_else(|| next_message(&message_rx).map(Message::IncomingLogLine));
             if matches!(
                 current_message.as_ref(),
                 Some(&Message::Input(InputMessage::ClearLog))
@@ -259,9 +289,8 @@ struct FileLoadingTracker {
 struct Model {
     src_dir: path::PathBuf,
     cart_path: path::PathBuf,
-    /// Checked during the [`handle_event`] call
-    log_message_rx: mpsc::Receiver<log_panel::VisitPayload>,
-
+    // /// Checked during the [`handle_event`] call
+    // log_message_rx: mpsc::Receiver<log_panel::VisitPayload>,
     /// An owned log-message
     log_messages: pico_build_rs::Fifo<Line<'static>>,
 
@@ -294,15 +323,10 @@ enum InputMessage {
 #[derive(Debug)]
 enum Message {
     Input(InputMessage),
-    // /// A request to open
-    // OpenCartridge {
-    //     cartridge_directory_path: path::PathBuf,
-    // },
-    // /// A request to compile the cartridge was made
-    // CompileCartridge {
-    //     src_dir: path::PathBuf,
-    //     cart_path: path::PathBuf,
-    // },
+    /// The analysis-request finished successfully
+    AnalysisOutput {
+        analyzed_data: Box<pico_8_cart_model::CartData<'static>>,
+    },
     /// The compilation-request finished successfully
     CompilationOutput {
         compiled_data: Box<pico_8_cart_model::CartData<'static>>,
@@ -313,18 +337,11 @@ enum Message {
     IncomingLogLine(LogLine),
 }
 
-// struct Message {
-//     /// The log needs an update, and the terminal might need a forced redraw
-//     incoming_log_message: Option<String>,
-//     /// The user has made a request, some action needs to be taken
-//     user_request: Option<UserRequest>,
-// }
-
 /// Make a decision regarding how the model should change
-fn handle_event(model @ Model { log_message_rx, .. }: &Model) -> Option<Message> {
-    if let Ok(log_message) = log_message_rx.try_recv() {
-        return Some(Message::IncomingLogLine(Line::from(&log_message)));
-    };
+fn handle_event(model: &Model) -> Option<Message> {
+    // if let Ok(log_message) = log_message_rx.try_recv() {
+    //     return Some(Message::IncomingLogLine(Line::from(&log_message)));
+    // };
 
     match event::poll(Duration::from_millis(10)) {
         Err(_) | Ok(false) => None,
@@ -346,6 +363,9 @@ fn handle_key(
     match key.code {
         KeyCode::Enter if key.is_press() => Some(InputMessage::Compile {
             src_dir: src_dir.clone(),
+            cart_path: cart_path.clone(),
+        }),
+        KeyCode::Char('a' | 'A') => Some(InputMessage::Analyze {
             cart_path: cart_path.clone(),
         }),
         KeyCode::Char('q' | 'Q') => Some(InputMessage::Quit),
@@ -417,12 +437,16 @@ fn update(
                     }
                 }
             }
-            InputMessage::Analyze { cart_path } => todo!("implement analyze"),
+            InputMessage::Analyze { cart_path } => {
+                tracing::info!("TODO: implement analyze ({cart_path:?})");
+                None
+            }
             InputMessage::Quit => {
                 *running_state = RunningState::Done;
                 None
             }
         },
+        Message::AnalysisOutput { analyzed_data } => todo!("implement analysis-output widget"),
         Message::CompilationOutput {
             compiled_data: cart,
             cart_path,
@@ -435,7 +459,7 @@ fn update(
                 .write(true)
                 .open(cart_path)
             else {
-                tracing::error!("Failed to open output cart");
+                tracing::info!("Failed to open output cart");
                 return None;
             };
             let buf: Vec<u8> = cart.into_cart_source();

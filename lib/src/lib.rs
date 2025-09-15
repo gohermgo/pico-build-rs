@@ -16,6 +16,7 @@ use pico_8_cart_model::section;
 
 /// A fixed-size collection
 /// acting like a `fifo`
+#[derive(Debug)]
 pub struct Fifo<T> {
     inner: Box<[T]>,
     cursor: usize,
@@ -521,6 +522,12 @@ impl<T> FileData<T> {
                 tracing::debug!("Loaded already");
                 Ok(())
             }
+        }
+    }
+    #[tracing::instrument(level = "debug", skip(self))]
+    pub fn unload(&mut self) {
+        if let FileData::Loaded { path, .. } = self {
+            *self = FileData::Unloaded(path.to_path_buf())
         }
     }
     #[tracing::instrument(level = "debug", skip(self))]
