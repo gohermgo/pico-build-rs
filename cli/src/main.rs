@@ -125,7 +125,6 @@ fn main() -> anyhow::Result<()> {
         cart_path,
         log_message_rx: message_rx,
         log_messages,
-        log_message_capacity: log_panel_chunk.height as usize,
         running_state: RunningState::Running,
         file_loading_tracker: FileLoadingTracker {
             paths: Default::default(),
@@ -262,17 +261,17 @@ struct Model {
 
     /// An owned log-message
     log_messages: pico_build_rs::Fifo<Line<'static>>,
-    /// The implied capacity for log-messages
-    log_message_capacity: usize,
 
     running_state: RunningState,
     file_loading_tracker: FileLoadingTracker,
 }
+#[derive(Debug)]
 enum RunningState {
     Done,
     Running,
 }
 /// A statement about how the model should change
+#[derive(Debug)]
 enum Message {
     // /// A request to open
     // OpenCartridge {
@@ -309,7 +308,7 @@ enum Message {
 /// Make a decision regarding how the model should change
 fn handle_event(model @ Model { log_message_rx, .. }: &Model) -> Option<Message> {
     if let Ok(log_message) = log_message_rx.try_recv() {
-        return Some(Message::IncomingLogLine(log_message.to_string().into()));
+        return Some(Message::IncomingLogLine(Line::from(&log_message)));
     };
 
     match event::poll(Duration::from_millis(10)) {
@@ -339,23 +338,16 @@ fn handle_key(
         _ => None,
     }
 }
+#[tracing::instrument(level = "trace", skip(log_messages, file_loading_tracker))]
 fn update(
     Model {
         log_messages,
-        log_message_capacity,
         running_state,
         file_loading_tracker,
         ..
     }: &mut Model,
     message: Message,
 ) -> Option<Message> {
-    // if let Some(log_message) = incoming_log_message {
-    //     while log_messages.len() >= *log_message_capacity {
-    //         log_messages.pop_front();
-    //     }
-    //     log_messages.push_back(log_message.into());
-    // }
-
     match message {
         Message::ClearLog => {
             for message in log_messages.iter_mut() {
@@ -365,24 +357,7 @@ fn update(
             None
         }
 
-        // Message::OpenCartridge {
-        //     cartridge_directory_path,
-        // } => {
-        //     let cartridge_name = cartridge_directory_path
-        //         .file_name()
-        //         .map(|file_name| file_name.to_string_lossy().into_owned())
-        //         .expect("cartridge_name");
-        //     file_loading_tracker.paths.insert(
-        //         cartridge_name,
-        //         FileLoadingState::Opening(cartridge_directory_path),
-        //     );
-        // }
         Message::CompileCartridge { src_dir, cart_path } => {
-            struct FileLoadingWidget {
-                path: path::PathBuf,
-                status: bool,
-            }
-
             tracing::info!("Writing to cart-path {cart_path:?}");
             let source_files = match pico_build_rs::get_lua_files(src_dir.as_path()) {
                 Ok(files) => files.inspect(|entry| {
@@ -424,94 +399,6 @@ fn update(
                     None
                 }
             }
-            // match pico_build_rs::compile_cartridge(cart_path.as_path(), source_files) {
-            //     Ok(cart) => Some(Message::CompilationOutput {
-            //         compiled_data: Box::new(cart),
-            //         cart_path,
-            //     }),
-            //     Err(e) => {
-            //         tracing::error!("Failed to compile {e}");
-            //         None
-            //     }
-            // }
-            // let mut lua_files: Box<[fs::DirEntry]> = pico_8_cart_builder::get_lua_files(&src_dir)
-            //     .map(|entries| {
-            //         entries
-            //             .inspect(|entry| {
-            //                 let path = entry.path();
-            //                 let name = path
-            //                     .file_name()
-            //                     .map(|file_name| file_name.to_string_lossy().into_owned())
-            //                     .unwrap_or_default();
-            //                 file_loading_tracker
-            //                     .paths
-            //                     .insert(name, FileLoadingState::Opened(path));
-            //             })
-            //             .collect()
-            //     })
-            //     .inspect_err(|e| tracing::error!(" failed to get lua files {e}"))
-            //     .ok()?;
-            // lua_files.sort_by_key(|dir_entry| dir_entry.path());
-            // let tabs = pico_8_cart_builder::dir_entries_to_tabs(lua_files.into_iter());
-            // match pico_8_cart_builder::merge_tabs_with_src(&cart_path, tabs) {
-            //     Ok(cart) => Some(Message::CompilationOutput {
-            //         compiled_data: Box::new(cart),
-            //         cart_path,
-            //     }),
-            //     Err(e) => {
-            //         tracing::error!("{e}");
-            //         tracing::error!("Compilation failed");
-            //         None
-            //     }
-            // }
-            // match pico_8_cart_builder::get_lua_files(&src_dir.clone())
-            //     .map(|entries| {
-            //         entries.inspect(|entry| {
-            //             let path = entry.path();
-            //             let name = path
-            //                 .file_name()
-            //                 .map(|file_name| file_name.to_string_lossy().into_owned())
-            //                 .unwrap_or_default();
-            //             file_loading_tracker
-            //                 .paths
-            //                 .insert(name, FileLoadingState::Opened(path));
-            //         })
-            //     })
-            //     .map(pico_8_cart_builder::dir_entries_to_tabs)
-            //     .and_then(|tabs| pico_8_cart_builder::merge_tabs_with_src(&cart_path, tabs))
-            // {
-            //     Ok(cart) => Some(Message::CompilationOutput {
-            //         compiled_data: Box::new(cart),
-            //         cart_path,
-            //     }),
-            //     Err(e) => {
-            //         tracing::error!("{e}");
-            //         tracing::error!("Compilation failed");
-            //         None
-            //     }
-            // }
-            // match pico_8_cart_builder::get_lua_files(src_dir.as_path())
-            //     .map(|entries| {
-            //         entries.inspect(|entry| {
-            //             let path = entry.path();
-            //             let name = path.to_string_lossy().into_owned();
-            //             file_loading_tracker
-            //                 .paths
-            //                 .insert(name, FileLoadingState::Opened(path));
-            //         })
-            //     })
-            //     .map(pico_8_cart_builder::dir_entries_to_tabs)
-            //     .map(pico_8_cart_builder::compile_tabs_to_cart_data)
-            // {
-            // }
-            // match pico_8_cart_builder::CartBuilder::new(&src_dir).build(&cart_path) {
-            //     Ok(cart) => Some(Message::CompilationOutput {
-            //         compiled_data: Box::new(cart),
-            //         cart_path,
-            //     }),
-            //     Err(e) => {
-            //     }
-            // }
         }
         Message::CompilationOutput {
             compiled_data: cart,

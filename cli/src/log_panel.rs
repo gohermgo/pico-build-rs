@@ -84,37 +84,62 @@ impl From<&str> for VisitData {
     }
 }
 
+impl<'a> From<&'a VisitData> for std::borrow::Cow<'a, str> {
+    fn from(value: &'a VisitData) -> Self {
+        match value {
+            VisitData::Debug(val) | VisitData::Str(val) => std::borrow::Cow::Borrowed(val),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct VisitMetadata {
+    level: tracing::Level,
     target: &'static str,
     span_name: &'static str,
     line_number: Option<u32>,
 }
 
-impl Default for VisitMetadata {
-    fn default() -> Self {
-        VisitMetadata {
-            target: "main",
-            span_name: Default::default(),
-            line_number: Default::default(),
+/// Stylizes and constructs a [`Span`] with the [`tracing::Level`]
+struct LevelSpan(tracing::Level);
+
+impl From<LevelSpan> for Span<'static> {
+    fn from(LevelSpan(level): LevelSpan) -> Self {
+        Span::styled(
+            level.to_string(),
+            Style::new().fg(match level {
+                tracing::Level::ERROR => Color::Red,
+                tracing::Level::WARN => Color::Yellow,
+                tracing::Level::INFO => Color::Green,
+                tracing::Level::DEBUG => Color::Blue,
+                tracing::Level::TRACE => Color::DarkGray,
+            }),
+        )
+    }
+}
+
+struct SourceSpan<'a> {
+    span_name: &'static str,
+    line_number: Option<&'a u32>,
+}
+
+impl From<SourceSpan<'_>> for Span<'static> {
+    fn from(
+        SourceSpan {
+            span_name,
+            line_number,
+        }: SourceSpan<'_>,
+    ) -> Self {
+        match line_number {
+            Some(number) => Span::raw(format!("{span_name} @ {number}")),
+            None => Span::raw(span_name),
         }
     }
 }
 
 impl core::fmt::Display for VisitMetadata {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let VisitMetadata {
-            target,
-            span_name,
-            line_number,
-        } = self;
-
-        let span_format = match line_number {
-            Some(number) => format!("{span_name} @ {number}"),
-            None => span_name.to_string(),
-        };
-
-        f.write_fmt(format_args!("{target} | {span_format}"))
+        f.write_fmt(format_args!("{}", Line::from(self)))
     }
 }
 
@@ -122,9 +147,34 @@ impl From<&tracing::Metadata<'static>> for VisitMetadata {
     fn from(value: &tracing::Metadata<'static>) -> Self {
         VisitMetadata {
             target: value.target(),
+            level: *value.level(),
             span_name: value.name(),
             line_number: value.line(),
         }
+    }
+}
+
+impl VisitMetadata {
+    pub fn spans(&self) -> impl Iterator<Item = Span<'static>> {
+        [
+            // Prints level and colorizes correctly
+            LevelSpan(self.level).into(),
+            // Add the target in
+            Span::raw(format!(" | {} | ", self.target)),
+            // Describes the message primarily
+            SourceSpan {
+                span_name: self.span_name,
+                line_number: self.line_number.as_ref(),
+            }
+            .into(),
+        ]
+        .into_iter()
+    }
+}
+
+impl From<&VisitMetadata> for Line<'static> {
+    fn from(visit_metadata: &VisitMetadata) -> Self {
+        Line::default().spans(visit_metadata.spans())
     }
 }
 
@@ -166,6 +216,48 @@ impl core::fmt::Display for VisitPayload {
     }
 }
 
+struct VisitDataSpan<'a> {
+    field: &'a Field,
+    data: &'a VisitData,
+}
+
+impl From<VisitDataSpan<'_>> for Span<'static> {
+    fn from(VisitDataSpan { field, data }: VisitDataSpan<'_>) -> Self {
+        let field_name = field.name();
+        let data_str: std::borrow::Cow<'_, str> = data.into();
+        let data_str = std::borrow::Cow::Owned(data_str.into_owned());
+        match field_name {
+            "return" => Span::styled(data_str, Style::new().fg(Color::DarkGray).italic()),
+            "message" => Span::raw(data_str),
+            _ => Span::raw(format!("{field_name}={data_str}")),
+        }
+    }
+}
+
+impl From<&VisitPayload> for Line<'static> {
+    fn from(
+        VisitPayload {
+            field,
+            data,
+            metadata,
+        }: &VisitPayload,
+    ) -> Self {
+        let mut line_builder = if let Some(metadata) = metadata {
+            Line::default().spans(
+                core::iter::once(Span::from("[ "))
+                    .chain(metadata.spans())
+                    .chain(core::iter::once(Span::from(" ] "))),
+            )
+        } else {
+            Line::default()
+        };
+
+        line_builder.push_span(VisitDataSpan { field, data });
+
+        line_builder
+    }
+}
+
 impl VisitPayload {
     pub fn new<'p, P: ?Sized>(
         field: &Field,
@@ -190,31 +282,34 @@ struct SendingVisitor<'ctx, T> {
 }
 
 impl<'ctx> SendingVisitor<'ctx, VisitPayload> {
-    fn send_payload<'p, P: ?Sized>(
-        &self,
-        field: &Field,
-        payload_data: &'p P,
-    ) -> Result<(), mpsc::SendError<VisitPayload>>
+    fn send_payload<'p, P: ?Sized>(&self, field: &Field, payload_data: &'p P)
     where
         VisitData: From<&'p P>,
     {
-        let payload = VisitPayload::new(field, self.metadata, payload_data);
-        self.message_tx.send(payload)
+        match self
+            .message_tx
+            .send(VisitPayload::new(field, self.metadata, payload_data))
+        {
+            Ok(_) => {}
+            Err(e) => eprintln!("Failed to send event from sending-visitor: {e}"),
+        }
     }
 }
 
 impl Visit for SendingVisitor<'_, VisitPayload> {
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        match self.send_payload(field, value) {
-            Ok(_) => {}
-            Err(e) => eprintln!("Failed to send event from sending-visitor: {e}"),
-        }
+        self.send_payload(field, value);
+        // match self.send_payload(field, value) {
+        //     Ok(_) => {}
+        //     Err(e) => eprintln!("Failed to send event from sending-visitor: {e}"),
+        // }
     }
     fn record_str(&mut self, field: &Field, value: &str) {
-        match self.send_payload(field, value) {
-            Ok(_) => {}
-            Err(e) => eprintln!("Failed to send event from sending-visitor: {e}"),
-        }
+        self.send_payload(field, value);
+        // match self.send_payload(field, value) {
+        //     Ok(_) => {}
+        //     Err(e) => eprintln!("Failed to send event from sending-visitor: {e}"),
+        // }
         // let metadata = self
         //     .metadata
         //     .map(|md| md.target().to_string())
